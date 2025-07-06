@@ -82,6 +82,16 @@ function serializeNode(node: Node): any | null {
     serialized.children = children;
   }
 
+  // 记录位置信息
+  const sourceFile = node.getSourceFile();
+  const startPos = sourceFile.getLineAndColumnAtPos(node.getPos());
+  const endPos = sourceFile.getLineAndColumnAtPos(node.getEnd());
+
+  serialized.position = {
+    start: { line: startPos.line, character: startPos.column },
+    end: { line: endPos.line, character: endPos.column },
+  };
+
   return serialized;
 }
 
