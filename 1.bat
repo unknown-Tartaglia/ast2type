@@ -1,0 +1,1 @@
+ts-node code2ast.ts -i test
