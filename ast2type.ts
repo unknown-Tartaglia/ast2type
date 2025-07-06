@@ -11,14 +11,14 @@ program.parse(process.argv);
 
 const options = program.opts();
 const inputDir = path.resolve(options.input);
-const outputDir = options.output ? path.resolve(options.output) : path.resolve("./output/constraint");
+const outputDir = options.output ? path.resolve(options.output) : path.resolve("./output");
 
 interface AstNode {
   kind: string;
   text?: string;
   children?: AstNode[];
   varId?: number;
-  childVarIds?: number[];
+  position?: { start: { line: number; character: number }; end: { line: number; character: number } }; // 添加 position 属性
 }
 
 // 遍历目录下所有 .ast.json 文件
@@ -36,11 +36,19 @@ function getAstFiles(dir: string): string[] {
   return files;
 }
 
-function processAstFile(inputFile: string, outputFile: string) {
+function processAstFile(inputFile: string, outputPath: string, outFileName: string) {
   const astRoot: AstNode = JSON.parse(fs.readFileSync(inputFile, "utf8"));
 
   let typeVarCounter = 0;
-  const vars: Record<number, { kind: string; text?: string; childVarIds: number[] }> = {};
+  const vars: Record<number,
+  { 
+    kind: string; 
+    text?: string; 
+    position?: 
+    { 
+      start: { line: number; character: number };
+      end: { line: number; character: number }
+    } }> = {};
   const universe = new Set<string>();
   const constraints: Array<[string, number, number | string, string]> = [];
   const typeEnv = new Map<string, number>();
@@ -84,8 +92,7 @@ function processAstFile(inputFile: string, outputFile: string) {
     },
     // 二元操作
     BinaryExpression(node) {
-      const hasAssignment = node.children?.some((c) => c.kind === "FirstAssignment");
-      if (hasAssignment && node.children && node.children.length >= 3) {
+      if (node.children && node.children.length >= 3) {
         const left = node.children[0];
         const operator = node.children[1];
         const right = node.children[2];
@@ -98,6 +105,7 @@ function processAstFile(inputFile: string, outputFile: string) {
         else if (left.varId !== undefined && right.varId !== undefined) {
           constraints.push(["equalVal", left.varId!, right.varId, `${left.text!} == ${right.text!}`]);
           constraints.push(["sameType", node.varId!, right.varId, `${node.text!} = ${right.text!}`]);
+          constraints.push(["sameType", node.varId!, left.varId, `${node.text!} == ${left.text!}`]);
         }
       }
     },
@@ -109,7 +117,8 @@ function processAstFile(inputFile: string, outputFile: string) {
         if (node.children![1].text == ":") {
           // 处理带类型注解初始化
           if (left.varId !== undefined && node.children![2].varId !== undefined) {
-            constraints.push(["sameType", left.varId, node.children![2].text!, `${left.text!} = ${node.children![2].text!}`]);
+            constraints.push(["hasType", left.varId, node.children![2].text!, `${left.text!} = ${node.children![2].text!}`]);
+            constraints.push(["sameType", left.varId, node.children![4].varId!, `${left.text!} == ${node.children![4].text!}`]);
             typeEnv.set(left.text!, left.varId!);
             universe.add(node.children![2].text!);
           }
@@ -130,7 +139,7 @@ function processAstFile(inputFile: string, outputFile: string) {
       if (node.children && node.children.length >= 5) {
         const classNode = node.children[1];
         if (classNode.varId !== undefined) {
-          constraints.push(["sameType", node.varId!, classNode.text!, `new ${classNode.text!}`]);
+          constraints.push(["hasType", node.varId!, classNode.text!, `new ${classNode.text!}`]);
           universe.add(classNode.text!);
         }
       }
@@ -158,7 +167,7 @@ function processAstFile(inputFile: string, outputFile: string) {
         if (node.children[1].kind === "ColonToken") {
           const typeNode = node.children[2];
           if (typeNode.varId !== undefined) {
-            constraints.push(["sameType", idNode.varId!, typeNode.text!, `${idNode.text!} : ${typeNode.text!}`]);
+            constraints.push(["hasType", idNode.varId!, typeNode.text!, `${idNode.text!} : ${typeNode.text!}`]);
             universe.add(typeNode.text!);
           }
         }
@@ -188,7 +197,7 @@ function processAstFile(inputFile: string, outputFile: string) {
         if (node.children[1].kind === "ColonToken") {
           const typeNode = node.children[2];
           if (typeNode.varId !== undefined) {
-            constraints.push(["sameType", idNode.varId!, typeNode.text!, `${idNode.text!} : ${typeNode.text!}`]);
+            constraints.push(["hasType", idNode.varId!, typeNode.text!, `${idNode.text!} : ${typeNode.text!}`]);
             typeEnv.set(idNode.text!, idNode.varId!);
             universe.add(typeNode.text!);
           }
@@ -202,7 +211,7 @@ function processAstFile(inputFile: string, outputFile: string) {
         if (callee.varId !== undefined && callee.text) {
           const funcType = functionEnv.get(callee.text);
           if (funcType) {
-            constraints.push(["sameType", node.varId!, funcType, `call ${callee.text!}`]);
+            constraints.push(["hasType", node.varId!, funcType, `call ${callee.text!}`]);
           }
         }
       }
@@ -212,25 +221,23 @@ function processAstFile(inputFile: string, outputFile: string) {
   function processNode(node: AstNode) {
     const id = getTypeVarId(node);
 
-    node.childVarIds = [];
-
     if (node.children) {
       for (const child of node.children) {
         processNode(child);
-        node.childVarIds.push(child.varId!);
       }
     }
 
     vars[id] = {
       kind: node.kind,
       text: node.text,
-      childVarIds: node.childVarIds,
+      position: node.position,
     };
 
     const handler = handlers[node.kind];
     if (handler) handler(node);
   }
 
+  // 处理节点并输出约束信息
   processNode(astRoot);
 
   const output = {
@@ -239,8 +246,10 @@ function processAstFile(inputFile: string, outputFile: string) {
     constraints,
     typeEnv: Object.fromEntries(typeEnv.entries()),
     functionEnv: Object.fromEntries(functionEnv.entries()),
+    variableTypes: deriveVariableTypes(),
   };
 
+  const outputFile = path.join(outputPath + "/constraint/", outFileName + ".constraints.json");
   const outputDirPath = path.dirname(outputFile);
   if (!fs.existsSync(outputDirPath)) {
     fs.mkdirSync(outputDirPath, { recursive: true });
@@ -248,6 +257,115 @@ function processAstFile(inputFile: string, outputFile: string) {
 
   fs.writeFileSync(outputFile, JSON.stringify(output, null, 2), "utf8");
   console.log(`Processed: ${path.basename(inputFile)} → ${path.basename(outputFile)}`);
+
+  // 类型约束传播求解
+  function deriveVariableTypes(): Record<string, string> {
+    const typeGraph: Record<number, number[]> = {};
+    const typeSet: Record<number, Set<string>> = {};
+
+    for (const [kind, a, b] of constraints) {
+      if (kind === "sameType" && typeof b === "number" && typeof a === "number") {
+        if (!typeGraph[a]) typeGraph[a] = [];
+        if (!typeGraph[b]) typeGraph[b] = [];
+        typeGraph[b].push(a);
+      }
+    }
+
+    for (const [kind, v, t] of constraints) {
+      if (kind === "hasType" && typeof t === "string") {
+        if (!typeSet[v]) typeSet[v] = new Set();
+        typeSet[v].add(t);
+      }
+    }
+
+    const worklist = Object.keys(typeSet).map(x => Number(x));
+
+    while (worklist.length > 0) {
+      const cur = worklist.pop()!;
+      const curTypes = typeSet[cur] ?? new Set();
+      for (const next of typeGraph[cur] || []) {
+        const key = `${cur}->${next}`;
+        const nextSet = typeSet[next] ?? new Set();
+        const sizeBefore = nextSet.size;
+        for (const t of curTypes) nextSet.add(t);
+        if (nextSet.size > sizeBefore) {
+          typeSet[next] = nextSet;
+          worklist.push(next);
+        }
+      }
+    }
+
+    for (const [kind, a, b] of constraints) {
+      if (kind === "equalVal" && typeof b === "number") {
+        const t1 = typeSet[a] ?? new Set();
+        const t2 = typeSet[b] ?? new Set();
+        const intersection = [...t1].filter(x => t2.has(x));
+        if (intersection.length === 0 && t1.size > 0 && t2.size > 0) {
+          console.warn(`Validation failed for ${vars[a].text} and ${vars[b].text}: no common types found:\n  - ${Array.from(t1).sort().join(", ")}\n  - ${Array.from(t2).sort().join(", ")}`);
+        }
+      }
+    }
+
+    // 生成 DOT 格式图
+    function generateTypeGraphDot(): string {
+      let dot = "digraph TypeGraph {\n  node [shape=box];\n";
+
+      let nodes = new Set<number>();
+      for (const [src, dsts] of Object.entries(typeGraph)) {
+          nodes.add(Number(src));
+          for (const dst in dsts) {
+            nodes.add(Number(dst))
+          }
+      }
+      for (const [varId, types] of Object.entries(typeSet)) {
+        nodes.add(Number(varId));
+      }
+
+      for (const node of nodes) {
+        const varName = vars[node].text && vars[node].text.length < 20 ? vars[node].text.replace(/\"/g, "\\\"") : `${node}`;
+        if (!vars[node].text) {
+          console.log(`No text for node ${node}`);
+        } else if (vars[node].text.length >= 20) {
+          console.log(`Long text for node ${node}: ${vars[node].text}`);
+        }
+        const types = typeSet[node];
+        const typeStr = types ? [...types].sort().join(" | ") : "unknown";
+        const v = vars[node];
+        const pos = v ? v.position
+          ? `(${v.position.start.line}:${v.position.start.character} - ${v.position.end.line}:${v.position.end.character})`
+          : "(no pos)" : "(no var)";
+        const label = `${varName}\\n${pos}\\n${typeStr}`;
+
+        dot += `  "${node}" [label="${label}"];\n`;
+      }
+
+      for (const [kind, a, b] of constraints) {
+        if (kind === "sameType" && typeof b === "number") {
+          dot += `  "${b}" -> "${a}";\n`;
+        }
+      }
+
+      dot += "}\n";
+      return dot;
+    }
+
+    // 写入文件
+    const outputFile = path.join(outputPath + "/dotfile/", outFileName + ".typegraph.dot");
+    const outputDirPath = path.dirname(outputFile);
+    if (!fs.existsSync(outputDirPath)) {
+      fs.mkdirSync(outputDirPath, { recursive: true });
+    }
+    
+    const dotContent = generateTypeGraphDot();
+    fs.writeFileSync(outputFile, dotContent, "utf8");
+
+    const result: Record<string, string> = {};
+    for (const [varName, varId] of typeEnv.entries()) {
+      const types = typeSet[varId];
+      result[varName] = types ? [...types].sort().join(" | ") : "unknown";
+    }
+    return result;
+  }
 }
 
 // 主流程
@@ -259,9 +377,8 @@ function main() {
 
   for (const astFile of astFiles) {
     const relative = path.relative(inputDir, astFile);
-    const outFileName = relative.replace(/\.ast\.json$/, ".constraints.json");
-    const outputPath = path.join(outputDir, outFileName);
-    processAstFile(astFile, outputPath);
+    const outFileName = relative.replace(/\.ast\.json$/, "");
+    processAstFile(astFile, outputDir, outFileName);
   }
 }
 

@@ -1,5 +1,5 @@
 let x = new Command();
-let y = x;
+let y = x + true;
 
 interface Point {
     x: number;

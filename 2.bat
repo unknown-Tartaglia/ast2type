@@ -1,1 +1,0 @@
-ts-node ast2type.ts -i output/ast
