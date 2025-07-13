@@ -114,7 +114,7 @@ function processAstFile(inputFile: string, outputPath: string, outFileName: stri
       // example: id [: type] = x
       if (node.children && node.children.length >= 3) {
         const left = node.children![0];
-        if (node.children![1].text == ":") {
+        if (node.children![1].text == ":" && node.children.length >= 5) {
           // 处理带类型注解初始化
           if (left.varId !== undefined && node.children![2].varId !== undefined) {
             constraints.push(["hasType", left.varId, node.children![2].text!, `${left.text!} = ${node.children![2].text!}`]);
