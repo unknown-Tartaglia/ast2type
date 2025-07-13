@@ -323,11 +323,11 @@ function processAstFile(inputFile: string, outputPath: string, outFileName: stri
 
       for (const node of nodes) {
         const varName = vars[node].text && vars[node].text.length < 20 ? vars[node].text.replace(/\"/g, "\\\"") : `${node}`;
-        if (!vars[node].text) {
-          console.log(`No text for node ${node}`);
-        } else if (vars[node].text.length >= 20) {
-          console.log(`Long text for node ${node}: ${vars[node].text}`);
-        }
+        // if (!vars[node].text) {
+        //   console.log(`No text for node ${node}`);
+        // } else if (vars[node].text.length >= 20) {
+        //   console.log(`Long text for node ${node}: ${vars[node].text}`);
+        // }
         const types = typeSet[node];
         const typeStr = types ? [...types].sort().join(" | ") : "unknown";
         const v = vars[node];
@@ -349,15 +349,69 @@ function processAstFile(inputFile: string, outputPath: string, outFileName: stri
       return dot;
     }
 
+    // 生成类型图的 JSON 格式
+    function generateTypeGraphJson(): { nodes: any[]; edges: any[] } {
+      const nodes: any[] = [];
+      const edges: any[] = [];
+      const seenNodeIds = new Set<number>();  // 用于避免重复节点
+    
+      for (const [src, dst] of Object.entries(typeGraph)) {
+        const srcId = Number(src);
+        const srcVar = vars[srcId];
+    
+        if (!seenNodeIds.has(srcId)) {
+          nodes.push({
+            id: srcId,
+            label: srcVar?.text || `var_${srcId}`,
+            type: typeSet[srcId] ? `${Array.from(typeSet[srcId] ?? []).sort().join(" | ")}` : "unknown",
+            text: srcVar?.text,
+            position: srcVar?.position,
+            title: `Types: ${Array.from(typeSet[srcId] ?? []).sort().join(" | ")}\nText: ${srcVar?.text}\nPos: ${JSON.stringify(srcVar?.position)}`
+          });
+          seenNodeIds.add(srcId);
+        }
+    
+        for (const dstId of dst) {
+          const dstVar = vars[dstId];
+    
+          if (!seenNodeIds.has(dstId)) {
+            nodes.push({
+              id: dstId,
+              label: dstVar?.text || `var_${dstId}`,
+              type: typeSet[dstId] ? `${Array.from(typeSet[srcId] ?? []).sort().join(" | ")}` : "unknown",
+              text: dstVar?.text,
+              position: dstVar?.position,
+              title: `Types: ${Array.from(typeSet[srcId] ?? []).sort().join(" | ")}\nText: ${srcVar?.text}\nPos: ${JSON.stringify(srcVar?.position)}`
+            });
+            seenNodeIds.add(dstId);
+          }
+    
+          edges.push({ from: srcId, to: dstId, label: "sameType" });
+        }
+      }
+    
+      return { nodes, edges };
+    }
+    
+    
+
     // 写入文件
     const outputFile = path.join(outputPath + "/dotfile/", outFileName + ".typegraph.dot");
     const outputDirPath = path.dirname(outputFile);
     if (!fs.existsSync(outputDirPath)) {
       fs.mkdirSync(outputDirPath, { recursive: true });
     }
-    
     const dotContent = generateTypeGraphDot();
     fs.writeFileSync(outputFile, dotContent, "utf8");
+
+    const jsonGraph = generateTypeGraphJson();
+    const jsonOutputFile = path.join(outputPath + "/jsonfile/", outFileName + ".typegraph.json");
+    const jsonoutputDirPath = path.dirname(jsonOutputFile);
+    if (!fs.existsSync(jsonoutputDirPath)) {
+      fs.mkdirSync(jsonoutputDirPath, { recursive: true });
+    }
+    fs.writeFileSync(jsonOutputFile, JSON.stringify(jsonGraph, null, 2), "utf8");
+
 
     const result: Record<string, string> = {};
     for (const [varName, varId] of typeEnv.entries()) {
