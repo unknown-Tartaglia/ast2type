@@ -108,7 +108,7 @@ function main() {
     const astJson = serializeNode(sourceFile);
 
     const relativePath = path.relative(inputDir, filePath);
-    const outputFileName = relativePath.replace(/[\/\\]/g, "_") + ".ast.json";
+    const outputFileName = relativePath.replace(/[\/\\]/g, "^") + ".ast.json";
     const outputFilePath = path.join(outputDir, outputFileName);
 
     fs.writeFileSync(outputFilePath, JSON.stringify(astJson, null, 2), "utf8");

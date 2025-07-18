@@ -17,11 +17,12 @@ function add(a: number, b: number): number {
 let result = add(1, 2);
 
 class Person {
-    name: string;
+    private name: string;
     constructor(name: string) {
       this.name = name;
     }
 }
   
 let alice = new Person("Alice");
+let name = alice.name;
   
