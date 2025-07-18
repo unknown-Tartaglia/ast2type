@@ -13,6 +13,20 @@ const options = program.opts();
 const inputDir = path.resolve(options.input);
 const outputDir = options.output ? path.resolve(options.output) : path.resolve("./output");
 
+// Type 类型
+type Type =
+  | { kind: "primitive"; name: string }
+  | { kind: "array"; elementType: Type }
+  | { kind: "function"; params: Param[]; returnType: Type }
+  | { kind: "union"; types: Type[] }
+  | { kind: "object"; properties: Record<string, Type> }
+  | { kind: "unknown" };
+
+interface Param {
+  name: string;
+  type: Type;
+}
+
 // AST 节点类型
 interface AstNode {
   kind: string;
@@ -25,7 +39,7 @@ interface AstNode {
 // 全局结构
 let typeVarCounter = 1;
 const fileToAst: Record<string, AstNode> = {};
-const globalExportMap: Record<string, Record<string, number | string>> = {};
+const globalExportMap: Record<string, Record<string, number>> = {};
 const allNodes: Record<number, { kind: string; text?: string; file?: string; position?: any }> = {};
 const allConstraints: Array<[string, number, number | string, string]> = [];
 const globalTypeEnv = new Map<string, number>();
@@ -62,6 +76,28 @@ function findNodesByKind(root: AstNode, kind: string): AstNode[] {
   return found;
 }
 
+// 递归打印类型
+function printType(t: Type): string {
+  switch (t.kind) {
+    case "primitive":
+      return t.name;
+    case "array":
+      return printType(t.elementType) + "[]";
+    case "function":
+      const paramsStr = t.params.map(p => `${p.name}: ${printType(p.type)}`).join(", ");
+      return `(${paramsStr}) => ${printType(t.returnType)}`;
+    case "object":
+      const propsStr = Object.entries(t.properties)
+        .map(([k, v]) => `${k}: ${printType(v)}`)
+        .join("; ");
+      return `{ ${propsStr} }`;
+    case "union":
+      return t.types.map(printType).join(" | ");
+    case "unknown":
+      return "unknown";
+  }
+}
+
 // 第一遍：标号并提取export
 function firstPass(filePath: string, ast: AstNode) {
   function walk(node: AstNode) {
@@ -70,21 +106,13 @@ function firstPass(filePath: string, ast: AstNode) {
 
     // 还原filepath中的_为\\
     let realPath = path.basename(filePath).replace(/\^/g, "\\").replace(/\.ast\.json/g, "");
-    // export 变量
-    if (node.kind === "VariableStatement" && node.children?.[0]?.kind === "ExportKeyword") {
-      const decl = node.children.find(n => n.kind === "VariableDeclaration");
-      if (decl && decl.text) {
-        globalExportMap[realPath] ??= {};
-        globalExportMap[realPath][decl.text] = decl.varId!;
-      }
-    }
 
     // export Class
     if (node.kind === "ClassDeclaration" && findNodesByKind(node, "ExportKeyword").length > 0) {
       const idNode = node.children?.find(n => n.kind === "Identifier");
       if (idNode && idNode.text) {
         globalExportMap[realPath] ??= {};
-        globalExportMap[realPath][idNode.text] = idNode.text!;
+        globalExportMap[realPath][idNode.text] = idNode.varId!;
       }
     }
   }
@@ -428,13 +456,7 @@ function secondPass(filePath: string, node: AstNode) {
         }
         const target = globalExportMap[resolvedFile]?.[symbol];
         if (target !== undefined) {
-          if (typeof target === "string") {
-            // 如果是字符串，表示是一个类型名
-            allConstraints.push(["hasType", idNode.varId!, target, `import ${symbol} from ${moduleSpecifier}`]);
-          } else {
-            // 如果是数字，表示是一个变量ID
-            allConstraints.push(["sameType", idNode.varId!, target, `import ${symbol} from ${moduleSpecifier}`]);
-          }
+          allConstraints.push(["sameType", idNode.varId!, target, `import ${symbol} from ${moduleSpecifier}`]);
         } else {
           // console.warn(`Symbol ${symbol} not found in export map of ${resolvedFile} in ${filePath}`);
           allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${symbol} from ${moduleSpecifier}`]);
