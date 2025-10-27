@@ -12,6 +12,8 @@
   "type": "commonjs",
   "devDependencies": {
     "@types/node": "^22.15.18",
+    "@types/react": "^19.2.2",
+    "@types/react-native": "^0.72.8",
     "prettier": "^3.5.3",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"

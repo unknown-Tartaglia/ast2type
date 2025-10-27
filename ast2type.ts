@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { Command } from "commander";
+import { ts, UnionTypeNode } from "ts-morph";
 
 // 命令行参数解析
 const program = new Command();
@@ -17,7 +18,7 @@ const LOG_SCOPE = false; // 是否开启日志作用域
 const LOG_TYPENODE = false; // 是否开启类型节点日志
 const LOG_TYPENODE_VERBOSE = false; // 是否开启类型节点详细日志
 const LOG_IDENTIFIER_NODE = false; // 是否开启标识符节点日志
-const LOG_IMPORT = false; // 是否开启导入日志
+const LOG_IMPORT = true; // 是否开启导入日志
 const LOG_TYPE_FLOW = false; // 是否开启类型流日志
 
 // 常量类型
@@ -42,9 +43,9 @@ interface Param {
 type TypeNode =
   | { kind: "primitive"; name: string }
   | { kind: "array"; elementType: number }
-  | { kind: "function"; params: Param[]; returnType: number }
+  | { kind: "function"; name: string; id: number; params: Param[]; returnType: number }
   | { kind: "union"; types: number[] }
-  | { kind: "object"; name: string; properties: Record<string, number> }
+  | { kind: "object"; name: string; id: number; properties: Record<string, number> }
   | { kind: "enum"; name: string; members: Record<string, number> };
 
 
@@ -79,6 +80,7 @@ const del: Record<number, Set<number>> = {};
 const parent: Record<number, number> = {};
 const globalImportMap : Map<string, string> = new Map(JSON.parse(fs.readFileSync(path.join(inputDir, "importMap.json"), "utf8")));
 let worklist: number[] = [];
+const funcParam: Record<number, number[]> = {};
 
 function getTypeVarId(node: AstNode): number {
   if (node.varId !== undefined) return node.varId;
@@ -129,10 +131,11 @@ function printType(n: number): string {
       case "array":
         return helper(t.elementType) + "[]";
       case "function":
-        const paramsStr = t.params.map(p => `${p.name}: ${helper(p.type)}`).join(", ");
-        return `(${paramsStr}) => ${helper(t.returnType)}`;
+        // const paramsStr = t.params.map(p => `${p.name}: ${helper(p.type)}`).join(", ");
+        // return `(${paramsStr}) => ${helper(t.returnType)}`;
+        return `function:${t.name}[${t.id}]`;
       case "object":
-        return `object:${t.name}`;
+        return `object:${t.name}[${t.id}]`;
       case "union":
         return t.types.map(helper).join(" | ");
       case "enum":
@@ -158,13 +161,18 @@ function printFullType(n: number): string {
       case "array":
         return helper(t.elementType) + "[]";
       case "function":
+        if (occur[t.id]) {
+          return `function:${t.name}`;
+        }
+        occur[t.id] = n;
+
         const paramsStr = t.params.map(p => `${p.name}: ${helper(p.type)}`).join(", ");
         return `(${paramsStr}) => ${helper(t.returnType)}`;
       case "object":
-        if (occur[t.name]) {
+        if (occur[t.id]) {
           return `object:${t.name}`;
         }
-        occur[t.name] = n;
+        occur[t.id] = n;
         const propsStr = Object.entries(t.properties)
           .map(([k, v]) => `${k}: ${helper(v)}`)
           .join("; ");
@@ -190,11 +198,11 @@ function serializeTypeNode(t: TypeNode): string {
     case "array":
       return `array:${t.elementType}`;
     case "function":
-      return `function:${t.params.map(p => `${p.name}:${p.type}`).join(",")}->${t.returnType}`;
+      return `function ${t.id}:${t.params.sort().map(p => `${p.name}:${p.type}`).join(",")}->${t.returnType}`;
     case "union":
       return `union:${t.types.sort().join("|")}`;
     case "object":
-      return `object:{${t.name}:${Object.entries(t.properties).sort().map(([k, v]) => `${k}:${v}`).join(",")}}`;
+      return `object:{${t.id}:${Object.entries(t.properties).sort().map(([k, v]) => `${k}:${v}`).join(",")}}`;
     case "enum":
       return `enum:{${t.name}:${Object.entries(t.members).sort().map(([k, v]) => `${k}=${v}`).join(",")}}`;
   }
@@ -211,7 +219,7 @@ function newTypeNode(ty: TypeNode): number{
 
 
   // 处理对象类型的循环引用
-  const occur: Record<string, number> = {};
+  const occur: Record<string, number> = Object.create(null);
   return helper(ty);
   function helper(t: TypeNode): number {
     if (!t) {
@@ -226,6 +234,12 @@ function newTypeNode(ty: TypeNode): number{
       }
     }
     else if (t.kind === "function") {
+      if (occur[t.id] !== undefined) {
+        occur[t.id] = newTypeNode(t)
+        return occur[t.id];
+      }
+      occur[t.id] = UNKNOWN;
+
       for (const param of t.params) {
         const ret = helper(typeNodes[param.type]);
         if (param.type !== ret) {
@@ -236,39 +250,57 @@ function newTypeNode(ty: TypeNode): number{
       if (t.returnType !== returnType) {
         t.returnType = returnType;
       }
+
+      if (occur[t.id] !== UNKNOWN && serializeTypeNode(typeNodes[occur[t.id]]) !== serializeTypeNode(t)) {
+        // 修改TypeNode，危险操作，传播影响
+        if (LOG_TYPENODE) {
+          console.log(`Change type node ${occur[t.id]} from ${JSON.stringify(typeNodes[occur[t.id]]) } to ${JSON.stringify(t)}`);
+        }
+        typeNodes[occur[t.id]] = t;
+        typeNodeReverseMap.set(serializeTypeNode(t), occur[t.id]);
+        for (const idStr in typeSet)
+          if (typeSet[Number(idStr)] === occur[t.id])
+            worklist.push(Number(idStr));
+        return occur[t.id];
+      }
     } else if (t.kind === "union") {
       const newTypes = t.types.map(ty => helper(typeNodes[ty]));
       t.types = newTypes;
     } else if (t.kind === "object") {
       // console.log(`enter ${t.name}`)
-      if (occur[t.name]) {
-        occur[t.name] = newTypeNode(t)
-        return occur[t.name];
+      if (occur[t.id]) {
+        occur[t.id] = newTypeNode(t)
+        return occur[t.id];
       }
-      occur[t.name] = UNKNOWN;
+      occur[t.id] = UNKNOWN;
+
       for (const key in t.properties) {
         const ret = helper(typeNodes[t.properties[key]]);
         if (t.properties[key] !== ret) {
           t.properties[key] = ret;
         }
       }
-      if (occur[t.name] !== UNKNOWN && serializeTypeNode(typeNodes[occur[t.name]]) !== serializeTypeNode(t)) {
+
+      if (occur[t.id] !== UNKNOWN && serializeTypeNode(typeNodes[occur[t.id]]) !== serializeTypeNode(t)) {
         // 修改TypeNode，危险操作，传播影响
         if (LOG_TYPENODE) {
-          console.log(`Change type node ${occur[t.name]} from ${JSON.stringify(typeNodes[occur[t.name]]) } to ${JSON.stringify(t)}`);
+          console.log(`Change type node ${occur[t.id]} from ${JSON.stringify(typeNodes[occur[t.id]]) } to ${JSON.stringify(t)}`);
         }
-        typeNodes[occur[t.name]] = t;
-        typeNodeReverseMap.set(serializeTypeNode(t), occur[t.name]);
+        typeNodes[occur[t.id]] = t;
+        typeNodeReverseMap.set(serializeTypeNode(t), occur[t.id]);
         for (const idStr in typeSet)
-          if (typeSet[Number(idStr)] === occur[t.name])
+          if (typeSet[Number(idStr)] === occur[t.id])
             worklist.push(Number(idStr));
-        return occur[t.name];
+        return occur[t.id];
       }
       // console.log(`exit ${t.name}`)
     }
     serialized = serializeTypeNode(t);
     if (typeNodeReverseMap.has(serialized)) {
       const id = typeNodeReverseMap.get(serialized)!;
+      if (LOG_TYPENODE) {
+        console.log(`find in typenode reverse map: ${id} : ${serialized}`);
+      }
       return id;
     } else {
       const id = typeVarCounter++;
@@ -299,7 +331,7 @@ function mergeTypes(tys: number[]) : number {
   } else if (tyList.length > 1) {
     ret = newTypeNode( { kind: "union", types: tyList});
   } else {
-    console.warn(`Trap!!! merge types ${[...tys]} to UNKNOWN`);
+    // console.warn(`Trap!!! merge types ${[...tys]} to UNKNOWN`);
     ret = UNKNOWN;
   }
   if (LOG_TYPE_FLOW) 
@@ -321,7 +353,7 @@ function mergeBranches(node : number, kinds? : string[]) : number {
     let tyList : number[] = [];
     for (const srcStr in source[node]) {
       const src = Number(srcStr);
-      if (kinds && !kinds.includes(graph[src][node])) continue;
+      if (kinds && !kinds.includes(graph[src][node]) || !kinds && graph[src][node] === "returnType") continue;
       const ty = source[node][src];
       if (typeNodes[ty].kind === "union") 
         tyList = tyList.concat([...typeNodes[ty].types]);
@@ -329,7 +361,14 @@ function mergeBranches(node : number, kinds? : string[]) : number {
     }
 
     
-    tyList = [...new Set(tyList.filter(ty => ty !== UNKNOWN))];
+    const seen = new Map<string, number>();
+    for (const ty of tyList) {
+      if (ty === UNKNOWN) continue;
+      const sig = printType(ty);
+      const old = seen.get(sig);
+      if (old === undefined || old < ty) seen.set(sig, ty);
+    }
+    tyList = [...seen.values()];    
 
 
     if (tyList.length === 1) {
@@ -341,7 +380,7 @@ function mergeBranches(node : number, kinds? : string[]) : number {
     }
   }
   if (LOG_TYPE_FLOW) 
-    console.log(`merge branches at ${node} from ${[...Object.values(source[node]) ]} to ${ret} as ${serializeTypeNode(typeNodes[ret])}`)
+    console.log(`merge branches at ${node} from ${[...Object.entries(source[node])]} to ${ret} as ${serializeTypeNode(typeNodes[ret])}`)
   return ret;
 }
 
@@ -368,8 +407,8 @@ function firstPass(filePath: string, ast: AstNode) {
     // 还原filepath中的^为\\
     let realPath = path.basename(filePath).replace(/\^/g, "\\").replace(/\.ast\.json/g, "");
 
-    // export Class Enum TypeAlias
-    if ((node.kind === "ClassDeclaration" || node.kind === "EnumDeclaration" || node.kind === "TypeAliasDeclaration") && findNodesByKind(node, "ExportKeyword").length > 0) {
+    // export Class Enum TypeAlias Interface
+    if ((node.kind === "ClassDeclaration" || node.kind === "InterfaceDeclaration" || node.kind === "EnumDeclaration" || node.kind === "TypeAliasDeclaration") && findNodesByKind(node, "ExportKeyword").length > 0) {
       const idNode = node.children?.find(n => n.kind === "Identifier");
       if (idNode && idNode.text) {
         globalExportMap[realPath] ??= {};
@@ -383,21 +422,57 @@ function firstPass(filePath: string, ast: AstNode) {
       }
     }
 
+    // export FirstStatement
+    if (node.kind === "FirstStatement" && findNodesByKind(node, "ExportKeyword").length > 0) {
+      const dftkwd = findNodesByKind(node.children?.[0]!, "DefaultKeyword")[0];
+      const vardcl = node.children?.find(n => n.kind === "VariableDeclarationList")
+      if (!vardcl) return;
+      const stx = vardcl.children?.find(n => n.kind === "SyntaxList");
+      if (!stx) return;
+      const idNodes = stx.children?.filter(n => n.kind === "VariableDeclaration");
+      if (!idNodes) return;
+      if (idNodes.length > 0) {
+        globalExportMap[realPath] ??= {};
+        for (const idNode of idNodes) 
+          if (idNode.children && idNode.children.length > 0 && idNode.children[0].kind === "Identifier" && idNode.children[0].text){
+          globalExportMap[realPath][idNode.children[0].text] = idNode.varId!;
+        }
+        // 处理default
+        if (dftkwd && idNodes.length === 1) {
+          const idNode = idNodes[0];
+          if (idNode.children && idNode.children.length > 0 && idNode.children[0].kind === "Identifier" && idNode.children[0].text) {
+            globalExportMap[realPath][dftkwd.text!] = dftkwd.varId!;
+            allConstraints.push(["sameType", dftkwd.varId!, idNodes[0].varId!, "default keyword"]);
+          }
+        }
+      }
+    }
+
     // exportDeclararion
     if (node.kind === "ExportDeclaration" || node.kind === "ExportAssignment") {
-      const idNodes = findNodesByKind(node, "Identifier");
-      for (const idNode of idNodes) 
-        if (idNode && idNode.text) {
+      // 处理default
+      if (!node.children) return;
+      const dftkwdIdx = node.children?.findIndex(n => n.kind === "DefaultKeyword");
+      const dftkwd = dftkwdIdx === -1 ? undefined : node.children?.[dftkwdIdx];
+      const idNode = dftkwdIdx === -1 ? node.children?.[1] : node.children?.[2];
+      if (idNode.text && idNode.kind === "Identifier") {
+        globalExportMap[realPath] ??= {};
+        globalExportMap[realPath][idNode.text] = idNode.varId!;
+      } else if (idNode.kind === "NamedExports") {
+        const idNodes = findNodesByKind(node, "ExportSpecifier");
+        if (idNodes.length > 0) {
           globalExportMap[realPath] ??= {};
-          globalExportMap[realPath][idNode.text] = idNode.varId!;
-          
-          // 处理default
-          const dftkwd = findNodesByKind(node, "DefaultKeyword")[0];
-          if (dftkwd) {
-            globalExportMap[realPath][dftkwd.text!] = dftkwd.varId!;
-            allConstraints.push(["sameType", dftkwd.varId!, idNode.varId!, "default keyword"]);
-            // TODO: 判断是否只有一个default
+          for (const idNode of idNodes) 
+            if (idNode.children && idNode.children.length > 0 && idNode.children[0].kind === "Identifier" && idNode.children[0].text){
+            globalExportMap[realPath][idNode.children[0].text] = idNode.varId!;
           }
+        }
+      }
+      if (dftkwd) {
+        globalExportMap[realPath] ??= {};
+        globalExportMap[realPath][dftkwd.text!] = dftkwd.varId!;
+        allConstraints.push(["sameType", dftkwd.varId!, idNode.varId!, "default keyword"]);
+        // TODO: 判断是否只有一个default
       }
     }
   }
@@ -413,6 +488,53 @@ function secondPass(filePath: string, node: AstNode) {
   let paramBindings = new Map<string, number>();
 
   const preOrderHandlers: Record<string, (node: AstNode) => void> = {
+    // 处理匿名对象
+    ObjectLiteralExpression(node) {
+      const lst = node.children?.find(n => n.kind === "SyntaxList");
+      if (lst) {
+        if (lst.children) {
+          const typeId = newTypeNode({ kind: "object", name: `anonymous${node.varId!}`, id: node.varId!, properties: Object.create(null) });
+          allConstraints.push(["hasType", node.varId!, typeId, `new object`]);
+        } else {
+          const typeId = newTypeNode({ kind: "object", name: `empty object`, id: 0, properties: Object.create(null) });
+          allConstraints.push(["hasType", node.varId!, typeId, `new object`]);
+        }
+      }
+    },
+    // 赋予属性
+    PropertyAssignment(node) {
+      if (node.children) {
+        const idNode = node.children?.find(n => n.kind === "Identifier");
+        if (!idNode || !idNode.varId || !idNode.text) return;
+
+        varBindings.set(idNode.text, idNode.varId!);
+
+        const index = node.children?.findIndex(n => n.kind === "ColonToken");
+        if (index !== undefined && index !== -1) {
+          const right = node.children?.[index + 1];
+          if (right && right.varId) {
+            allConstraints.push(["sameType", idNode.varId, right.varId, `${idNode.text} : ${right.text}`]);
+          }
+        }
+
+        const obj = node.parent?.parent;
+        if (!obj || !obj.varId) return;
+        allConstraints.push(["initProperty", obj.varId, idNode.varId, `initial property ${idNode.text} for anonymous object`]);
+      }
+    },
+    // 短赋予属性
+    ShorthandPropertyAssignment(node) {
+      if (node.children) {
+        const idNode = node.children?.find(n => n.kind === "Identifier");
+        if (!idNode || !idNode.varId || !idNode.text) return;
+
+        if (node.children.length === 3) varBindings.set(idNode.text, idNode.varId!);
+
+        const obj = node.parent?.parent;
+        if (!obj || !obj.varId) return;
+        allConstraints.push(["initProperty", obj.varId, idNode.varId, `initial property ${idNode.text} for anonymous object`]);
+      }
+    },
     // 处理函数声明
     FunctionDeclaration(node) {
       if (node.children) {
@@ -427,18 +549,18 @@ function secondPass(filePath: string, node: AstNode) {
         if (index !== undefined && index !== -1) {
           const typeNode = node.children?.[index + 1];
           if (typeNode && typeNode.varId) {
-            const id = newTypeNode({ kind: "function", params: [], returnType: UNKNOWN });
+            const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: UNKNOWN });
             typeSet[idNode?.varId!] = id;
             allConstraints.push(["returnAnnotation", idNode?.varId!, typeNode.varId, `return type of function ${idNode?.text!}`]);
           }
         }
         else if (findNodesByKind(node, "ReturnStatement").length === 0) {
           // 如果没有返回类型注解并且没有Return语句
-          const id = newTypeNode({ kind: "function", params: [], returnType: VOID });
+          const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: VOID });
           typeSet[idNode?.varId!] = id;
         }
         else {
-          const id = newTypeNode({ kind: "function", params: [], returnType: UNKNOWN });
+          const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: UNKNOWN });
           typeSet[idNode?.varId!] = id;
         }
       }
@@ -488,7 +610,8 @@ function secondPass(filePath: string, node: AstNode) {
       if (!paNode || paNode.varId === undefined || paNode.kind !== "ModuleDeclaration") return;
       paNode = paNode.children?.find(n => n.kind === "Identifier");
       if (!paNode) return;
-      allConstraints.push(["setProperty", paNode.varId!, left.varId!, `${paNode.text!}.${left.text!}`]);
+      allConstraints.push(["initProperty", paNode.varId!, left.varId!, `${paNode.text!}.${left.text!}`]);
+      allConstraints.push(["takeProperty", left.varId!, paNode.varId!, `${paNode.text!}.${left.text!}`]);
     },
     // 处理函数参数
     Parameter(node) {
@@ -506,13 +629,25 @@ function secondPass(filePath: string, node: AstNode) {
             // return 
           }
         }
+        
+        // 处理初始化
+        const equalIndex = node.children?.findIndex(n => n.kind === "FirstAssignment");
+        if (equalIndex !== undefined && equalIndex !== -1) {
+          const right = node.children?.[equalIndex + 1];
+          if (right && right.varId) {
+            allConstraints.push(["sameType", paramIdNode.varId!, right.varId, `parameter ${paramIdNode.text!} = ${right.text!}`]);
+            // return 
+          }
+        }
 
         let funcIdNode = node.parent;
-        while (funcIdNode && funcIdNode.kind !== "FunctionDeclaration" && funcIdNode.kind !== "MethodDeclaration") funcIdNode = funcIdNode.parent;
-        funcIdNode = funcIdNode?.children?.find(n => n.kind === "Identifier");
+        while (funcIdNode && funcIdNode.kind !== "FunctionDeclaration" && funcIdNode.kind !== "MethodDeclaration" && funcIdNode.kind !== "ArrowFunction") funcIdNode = funcIdNode.parent;
+        funcIdNode = funcIdNode?.kind === "ArrowFunction" ? funcIdNode : funcIdNode?.children?.find(n => n.kind === "Identifier");
         if (!funcIdNode || !funcIdNode.varId) return;
 
-        allConstraints.push(["setPramType", funcIdNode.varId!, paramIdNode.varId!, `parameter ${paramIdNode.text!} in function ${funcIdNode.text!}`]);
+        allConstraints.push(["setParamType", funcIdNode.varId!, paramIdNode.varId!, `parameter ${paramIdNode.text!} in function ${funcIdNode.text!}`]);
+        if (!funcParam[funcIdNode.varId]) funcParam[funcIdNode.varId] = [];
+        funcParam[funcIdNode.varId].push(paramIdNode.varId);
       }
     },
     // 处理枚举声明
@@ -530,7 +665,8 @@ function secondPass(filePath: string, node: AstNode) {
         if (!paNode || paNode.varId === undefined || paNode.kind !== "ModuleDeclaration") return;
         paNode = paNode.children?.find(n => n.kind === "Identifier");
         if (!paNode) return;
-        allConstraints.push(["setProperty", paNode.varId!, idNode.varId!, `${paNode.text!}.${idNode.text!}`]);
+        allConstraints.push(["initProperty", paNode.varId!, idNode.varId!, `${paNode.text!}.${idNode.text!}`]);
+        allConstraints.push(["takeProperty", idNode.varId!, paNode.varId!, `${idNode.text!}.${paNode.text!}`]);
       }
     },
     // 处理枚举成员
@@ -556,7 +692,7 @@ function secondPass(filePath: string, node: AstNode) {
       if (node.children && node.children.length >= 2) {
         const idNode = node.children?.filter(n => n.kind === "Identifier")[0];
         if (idNode && idNode.varId !== undefined) {
-          const typeId = newTypeNode({ kind: "object", name: idNode.text!, properties: Object.create(null) });
+          const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
           typeSet[idNode.varId] = typeId;
           varBindings.set(idNode.text!, idNode.varId!);
         }
@@ -566,10 +702,11 @@ function secondPass(filePath: string, node: AstNode) {
         if (!paNode || paNode.varId === undefined || paNode.kind !== "ModuleDeclaration") return;
         paNode = paNode.children?.find(n => n.kind === "Identifier");
         if (!paNode) return;
-        allConstraints.push(["setProperty", paNode.varId!, idNode.varId!, `${paNode.text!}.${idNode.text!}`]);
+        allConstraints.push(["initProperty", paNode.varId!, idNode.varId!, `${paNode.text!}.${idNode.text!}`]);
+        allConstraints.push(["takeProperty", idNode.varId!, paNode.varId!, `${idNode.text!}.${paNode.text!}`]);
       }
     },
-    // 处理接口Property
+    // 处理接口property
     PropertySignature(node) {
       if (node.children && node.children.length >= 2) {
         let idNode = node.parent;
@@ -587,11 +724,13 @@ function secondPass(filePath: string, node: AstNode) {
         if (index !== undefined && index !== -1) {
           const typeNode = node.children?.[index + 1];
           if (typeNode && typeNode.varId) {
-            allConstraints.push(["setProperty", idNode.varId!, propIdNode.varId!, `${idNode.text!}.${propIdNode.text!}`]);
+            allConstraints.push(["initProperty", idNode.varId!, propIdNode.varId!, `${idNode.text!}.${propIdNode.text!}`]);
+            allConstraints.push(["takeProperty", propIdNode.varId!, idNode.varId!, `${propIdNode.text!}.${idNode.text!}`]);
             allConstraints.push(["annotation", propIdNode.varId, typeNode.varId, `annotation ${idNode.text!}.${propIdNode.text!} : ${typeNode.text!}`]);
           }
         } else {
-          allConstraints.push(["setProperty", idNode.varId!, propIdNode.varId!, `${idNode.text!}.${propIdNode.text!}`]);
+          allConstraints.push(["initProperty", idNode.varId!, propIdNode.varId!, `${idNode.text!}.${propIdNode.text!}`]);
+          allConstraints.push(["takeProperty", propIdNode.varId!, idNode.varId!, `${propIdNode.text!}.${idNode.text!}`]);
         }
       }
     },
@@ -608,7 +747,7 @@ function secondPass(filePath: string, node: AstNode) {
 
         varBindings.set(methodIdNode.text, methodIdNode.varId!);
 
-        let funcType: TypeNode = { kind: "function", params: [], returnType: UNKNOWN };
+        let funcType: TypeNode = { kind: "function", name: methodIdNode?.text!, id: methodIdNode?.varId!, params: [], returnType: UNKNOWN };
         const index = node.children?.findIndex(n => n.kind === "ColonToken");
         // 类型注解
         if (index !== undefined && index !== -1) {
@@ -623,7 +762,8 @@ function secondPass(filePath: string, node: AstNode) {
         const typeId = newTypeNode(funcType);
         typeSet[methodIdNode.varId] = typeId;
 
-        allConstraints.push(["setProperty", idNode.varId, methodIdNode.varId, `${methodIdNode.text!}() => ${printType(typeId)}`]);
+        allConstraints.push(["initProperty", idNode.varId, methodIdNode.varId, `${methodIdNode.text!}() => ${printType(typeId)}`]);
+        allConstraints.push(["takeProperty", methodIdNode.varId!, idNode.varId!, `${methodIdNode.text!}.${idNode.text!}`]);
       }
     },
     // 处理class声明
@@ -631,7 +771,7 @@ function secondPass(filePath: string, node: AstNode) {
       if (node.children && node.children.length >= 2) {
         const idNode = node.children?.filter(n => n.kind === "Identifier")[0];
         if (idNode && idNode.varId) {
-          const typeId = newTypeNode({ kind: "object", name: idNode.text!, properties: Object.create(null) });
+          const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
           if (LOG_IDENTIFIER_NODE)
             console.log(`Class ${idNode.text} has type ID ${typeId}`);
           typeSet[idNode.varId] = typeId;
@@ -655,7 +795,9 @@ function secondPass(filePath: string, node: AstNode) {
         const propIdNode = findNodesByKind(node, "Identifier")[0];
         if (!propIdNode || propIdNode.varId === undefined) return;
 
-        allConstraints.push(["setProperty", idNode.varId!, propIdNode.varId!, `${idNode.text!}.${propIdNode.text!}`]);
+        allConstraints.push(["initProperty", idNode.varId!, propIdNode.varId!, `${idNode.text!}.${propIdNode.text!}`]);
+        allConstraints.push(["takeProperty", propIdNode.varId!, idNode.varId!, `${propIdNode.text!}.${idNode.text!}`]);
+        
 
         const colonNode = node.children.find(n => n.kind === "ColonToken");
         const equalNode = node.children.find(n => n.kind === "FirstAssignment");
@@ -688,14 +830,14 @@ function secondPass(filePath: string, node: AstNode) {
     MethodDeclaration(node) {
       if (node.children && node.children.length >= 2) {
         let idNode = node.parent;
-        while (idNode && idNode.kind !== "ClassDeclaration") idNode = idNode.parent;
-        idNode = idNode?.children?.find(n => n.kind === "Identifier");
+        while (idNode && idNode.kind !== "ClassDeclaration" && idNode.kind !== "ObjectLiteralExpression") idNode = idNode.parent;
+        idNode = idNode?.kind === "ObjectLiteralExpression" ? idNode : idNode?.children?.find(n => n.kind === "Identifier");
         if (!idNode || idNode.varId === undefined) return;
 
         const propIdNode = node.children?.find(n => n.kind === "Identifier");
         if (propIdNode && propIdNode.varId !== undefined) {
 
-          let funcType: TypeNode = { kind: "function", params: [], returnType: UNKNOWN };
+          let funcType: TypeNode = { kind: "function", name: propIdNode?.text!, id: propIdNode?.varId!, params: [], returnType: UNKNOWN };
           const index = node.children?.findIndex(n => n.kind === "ColonToken");
           // 类型注解
           if (index !== undefined && index !== -1) {
@@ -713,7 +855,8 @@ function secondPass(filePath: string, node: AstNode) {
           const typeId = newTypeNode(funcType);
           typeSet[propIdNode.varId] = typeId;
 
-          allConstraints.push(["setProperty", idNode.varId, propIdNode.varId, `${propIdNode.text!}() => ${printType(typeId)}`]);
+          allConstraints.push(["initProperty", idNode.varId, propIdNode.varId, `${propIdNode.text!}() => ${printType(typeId)}`]);
+          allConstraints.push(["takeProperty", propIdNode.varId!, idNode.varId!, `${propIdNode.text!}.${idNode.text!}`]);
         }
       }
     },
@@ -722,7 +865,7 @@ function secondPass(filePath: string, node: AstNode) {
       const idNode = node.children?.find(n => n.kind === "Identifier");
 
       if(idNode && idNode.varId) {
-        const typeId = newTypeNode({ kind: "object", name: idNode.text!, properties: Object.create(null) });
+        const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
         typeSet[idNode.varId] = typeId;
         varBindings.set(idNode.text!, idNode.varId!);
       }
@@ -752,18 +895,19 @@ function secondPass(filePath: string, node: AstNode) {
 
         const nsimpt = findNodesByKind(node, "NamespaceImport")[0];
         if (idNode.varId === nsimpt?.children?.find(n => n.kind === "Identifier")?.varId) {
-          const typeId = newTypeNode({ kind: "object", name: idNode.text!, properties: Object.create(null) });
+          const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
           typeSet[idNode.varId!] = typeId;
           varBindings.set(idNode.text!, idNode.varId!);
           for (const symb in globalExportMap[resolvedFile]) {
-            allConstraints.push(["setProperty", idNode.varId!, globalExportMap[resolvedFile]?.[symb], ""])
+            allConstraints.push(["initProperty", idNode.varId!, globalExportMap[resolvedFile]?.[symb], ""])
+            allConstraints.push(["takeProperty", globalExportMap[resolvedFile]?.[symb], idNode.varId!, ``]);
           }
           continue;
         }
 
-        const target = globalExportMap[resolvedFile]?.[symbol];
+        const target = globalExportMap[resolvedFile]?.[symbol] === undefined? globalExportMap[resolvedFile]?.["default"] : globalExportMap[resolvedFile]?.[symbol];
         if (target !== undefined) {
-          allConstraints.push(["sameType", idNode.varId!, target, `import ${symbol} from ${moduleSpecifier}`]);
+          allConstraints.push(["sameType", idNode.varId!, target, `Success import ${symbol} from ${moduleSpecifier}`]);
         } else {
           if (LOG_IMPORT)
             console.warn(`Symbol ${symbol} not found in export map of ${resolvedFile} in ${filePath}`);
@@ -836,7 +980,7 @@ function secondPass(filePath: string, node: AstNode) {
     ObjectKeyword(node) {
       // 用法存疑
       if (node.varId === undefined) return;
-      const id = newTypeNode({ kind: "object", name: "Object", properties: Object.create(null) });
+      const id = newTypeNode({ kind: "object", name: "Object", id: node.varId!, properties: Object.create(null) });
       allConstraints.push(["hasType", node.varId, id, `${node.text!} ∈ Object`]);
     },
     ThisKeyword(node) {
@@ -943,7 +1087,6 @@ function secondPass(filePath: string, node: AstNode) {
         }
       }
     },
-
     // 处理一元操作
     PrefixUnaryExpression(node) {
       if (node.children && node.children.length >= 2) {
@@ -968,10 +1111,15 @@ function secondPass(filePath: string, node: AstNode) {
         if (left.varId !== undefined && right.varId !== undefined && operator.kind === "FirstAssignment") {
           allConstraints.push(["sameType", left.varId, right.varId, `${left.text!} = ${right.text!}`]);
           allConstraints.push(["sameType", node.varId!, right.varId, `${node.text!} = ${right.text!}`]);
+          allConstraints.push(["sameType", right.varId!, left.varId, `${left.text!} = ${right.text!}`]);
+          // 处理对象属性设置
+          if (left.kind === "PropertyAccessExpression" && left.children && left.children.length! >= 3) {
+            allConstraints.push(["setProperty", left.children[0].varId!, left.varId, `${left.children[0].text}.${left.children[2].text} = ${left.children[0].text}`]);
+          }
         }
         // 处理加减乘除模运算
         else if (left.varId !== undefined && right.varId !== undefined && operator.kind === "PlusToken" || operator.kind === "MinusToken" || operator.kind === "AsteriskToken" || operator.kind === "SlashToken" || operator.kind === "PercentToken") {
-          allConstraints.push(["equalVal", left.varId!, right.varId!, `${left.text!} == ${right.text!}`]);
+          allConstraints.push(["sameType", left.varId!, right.varId!, `${left.text!} == ${right.text!}`]);
           allConstraints.push(["sameType", node.varId!, right.varId!, `${node.text!} = ${right.text!}`]);
           allConstraints.push(["sameType", node.varId!, left.varId!, `${node.text!} == ${left.text!}`]);
         }
@@ -983,6 +1131,9 @@ function secondPass(filePath: string, node: AstNode) {
         // 处理比较运算
         else if (left.varId !== undefined && right.varId !== undefined && (operator.kind === "LessThanToken" || operator.kind === "GreaterThanToken" || operator.kind === "LessThanEqualsToken" || operator.kind === "GreaterThanEqualsToken" || operator.kind === "EqualsEqualsToken" || operator.kind === "ExclamationEqualsToken" || operator.kind === "EqualsEqualsEqualsToken" || operator.kind === "ExclamationEqualsEqualsToken")) {
           allConstraints.push(["hasType", node.varId!, BOOLEAN, `${node.text!} ∈ boolean`]);
+          // 认为是同一类型
+          // allConstraints.push(["sameType", left.varId, right.varId, `${left.text!} ${operator.text} ${right.text}`]);
+          // allConstraints.push(["sameType", right.varId, left.varId, `${left.text!} ${operator.text} ${right.text}`]);
         }
         // TODO: 更多二元运算
       }
@@ -1084,8 +1235,8 @@ function secondPass(filePath: string, node: AstNode) {
         const exprNode = node.children[1];
 
         let funcNode = node.parent;
-        while (funcNode && funcNode.kind !== "FunctionDeclaration" && funcNode.kind !== "MethodDeclaration") funcNode = funcNode.parent;
-        funcNode = funcNode?.children?.find(n => n.kind === "Identifier");
+        while (funcNode && funcNode.kind !== "FunctionDeclaration" && funcNode.kind !== "MethodDeclaration" && funcNode.kind !== "ArrowFunction") funcNode = funcNode.parent;
+        funcNode = funcNode?.kind === "ArrowFunction" ? funcNode : funcNode?.children?.find(n => n.kind === "Identifier");
 
         if (!funcNode || !funcNode.varId || !exprNode.varId) return;
         if (exprNode.kind === "SemicolonToken") {
@@ -1103,6 +1254,14 @@ function secondPass(filePath: string, node: AstNode) {
         const funcNode = node.children[0];
         if (funcNode.varId !== undefined && node.varId !== undefined) {
           allConstraints.push(["funcCall", node.varId, funcNode.varId, `${node.text}`]);
+
+          // 处理实参
+          const args = node.children.find(n => n.kind === "SyntaxList");
+          let idx = 0;
+          for (const arg of args?.children?.filter(n => n.kind !== "CommaToken") ?? []) {
+            allConstraints.push(["funcToArg", arg.varId!, funcNode.varId * 1000 + idx, `${node.text}`]);
+            idx++;
+          }
         }
       }
     },
@@ -1126,6 +1285,28 @@ function secondPass(filePath: string, node: AstNode) {
         }
       }
       // TODO: 其余操作
+      if (node.children) {
+        const index = node.children?.findIndex(n => n.kind === "ColonToken");
+        // 类型注解
+        if (index !== undefined && index !== -1) {
+          const typeNode = node.children?.[index + 1];
+          if (typeNode && typeNode.varId) {
+            const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: node.varId!, params: [], returnType: UNKNOWN });
+            typeSet[node.varId!] = id;
+            allConstraints.push(["returnAnnotation", node?.varId!, typeNode.varId, `return type of function ${node?.text!}`]);
+          }
+        }
+        else if (findNodesByKind(node, "ReturnStatement").length === 0) {
+          // 如果没有返回类型注解并且没有Return语句
+          const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: node?.varId!, params: [], returnType: VOID });
+          typeSet[node?.varId!] = id;
+        }
+        else {
+          const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: node?.varId!, params: [], returnType: UNKNOWN });
+          typeSet[node?.varId!] = id;
+        }
+      }
+
     },
     // => 操作符
     EqualsGreaterThanToken(node) {
@@ -1194,11 +1375,11 @@ function secondPass(filePath: string, node: AstNode) {
       const realCurrentPath = path.basename(currentFilePath).replace(/\^/g, "\\").replace(/\.ast\.json/g, "");
       const absbase = path.resolve(path.dirname(realCurrentPath), importSpecifier);
       const base = path.relative(process.cwd(), absbase);
-      for (const extname of [".ts", ".js", ".ets", ".tsx", ".d.ts", ".d.ets"]) {
+      for (const extname of ["", ".ts", ".js", ".ets", ".tsx", ".d.ts", ".d.ets"]) {
         const ret = base + extname;
         if (fs.existsSync(path.join(path.dirname(currentFilePath), ret.replace(/\\/g, "^") + ".ast.json")))
           return ret;
-        // console.error(`base: ${path.join(path.dirname(currentFilePath), ret.replace(/\\/g, "^"))}`);
+        console.error(`base: ${path.join(path.dirname(currentFilePath), ret.replace(/\\/g, "^"))}`);
       }
       return undefined
     } else {
@@ -1263,10 +1444,25 @@ function deriveVariableTypes() {
       }
       typeSet[a] = b; source[a] ??= {};
     } else if (kind !== "sameID") {
+      if (kind === "funcToArg") {
+        const func = find(Math.floor(b / 1000));
+        const idx = b % 1000;
+        // if (!funcParam[func]?.[idx]) {
+        //   console.log(`Can not find Correspond param #${idx} of function ${syntaxNodes[func]?.text!}[${func}]`);
+        //   continue;
+        // } else {
+        //   console.log(`Find Correspond param #${idx} of function ${syntaxNodes[func]?.text!}[${func}]`);
+        // }
+        a = a * 1000 + idx;
+        b = func;
+      }
       b = find(Number(b));
       if (b === a) continue; // 避免自引用
       graph[b] ??= {}; graph[b][a] = kind;
       source[a] ??= {}; source[a][b] = UNKNOWN;
+      if (kind === "setParamType" || kind === "initProperty") {
+        typeSet[b] ??= UNKNOWN;
+      }
     }
   }
 
@@ -1301,29 +1497,36 @@ function deriveVariableTypes() {
 
 
       //  数据流处理
-      if (graph[cur][next] === "sameType" || graph[cur][next] === "annotation") {
+      if (graph[cur][next] === "sameType" || graph[cur][next] === "ArgToParam" /*|| graph[cur][next] === "annotation"*/) {
         // 如果是同类型
         source[next][cur] = tSet;
         typeSet[next] = mergeBranches(next);
       }
       else if (graph[cur][next] === "takeProperty") {
         // 如果是取属性，添加属性类型
-        const propName = syntaxNodes[next]?.text!.split(".").pop();
-        if (propName && typeNodes[tSet] && typeNodes[tSet].kind == "object" && propName in typeNodes[tSet].properties) {
-          source[next][cur] = typeNodes[tSet].properties[propName];
-          if (LOG_TYPE_FLOW)
-            console.log(`takeProperty[object] ${typeNodes[tSet].properties[propName]} for ${propName} in edge ${cur}->${next}`);
-        } else if (propName && typeNodes[tSet] && typeNodes[tSet].kind == "enum" && propName in typeNodes[tSet].members) {
-          source[next][cur] = typeNodes[tSet].members[propName];
-          if (LOG_TYPE_FLOW)
-            console.log(`takeProperty[enum] ${typeNodes[tSet].members[propName]} for ${propName} in edge ${cur}->${next}`);
+        if (!syntaxNodes[next]?.text) {
+          console.error(`fail to takeProperty because text size too short`);
+          continue;
+        } else {
+          const propName = syntaxNodes[next]?.text.split(".").pop();
+          if (propName && typeNodes[tSet] && typeNodes[tSet].kind == "object" && propName in typeNodes[tSet].properties) {
+            source[next][cur] = typeNodes[tSet].properties[propName];
+            if (LOG_TYPE_FLOW)
+              console.log(`takeProperty[object] ${typeNodes[tSet].properties[propName]} for ${propName} in edge ${cur}->${next}`);
+          } else if (propName && typeNodes[tSet] && typeNodes[tSet].kind == "enum" && propName in typeNodes[tSet].members) {
+            source[next][cur] = typeNodes[tSet].members[propName];
+            if (LOG_TYPE_FLOW)
+              console.log(`takeProperty[enum] ${typeNodes[tSet].members[propName]} for ${propName} in edge ${cur}->${next}`);
+          }
         }
-        typeSet[next] = mergeBranches(next);
+        typeSet[next] = mergeBranches(next) === UNKNOWN ? typeSet[next] : mergeBranches(next);
       }
       else if (graph[cur][next] === "arrayElement") {
         // 取数组成员
         if (typeNodes[tSet]?.kind === "array") {
           source[next][cur] = typeNodes[tSet].elementType;
+        } if (typeNodes[tSet]?.kind === "primitive" && typeNodes[tSet].name === "string") {
+          source[next][cur] = mergeTypes([STRING, UNDEFINED]);
         } else {
           console.warn(`Unexpected arrayElement when type ${tSet} : ${printType(tSet)} is not array in edge ${cur}->${next}`);
         }
@@ -1349,9 +1552,70 @@ function deriveVariableTypes() {
 
 
       // 控制流处理
-      else if (graph[cur][next] === "setProperty") {
+      else if(graph[cur][next] === "funcToArg") {
+        const ty = typeNodes[typeSet[cur]];
+        const arg = find(Math.floor(next / 1000));
+        const idx = next % 1000;
+        let func;
+        if (!ty) {
+          console.error(`error: function Node ${syntaxNodes[cur].text}[${cur}] with null type!`);
+          continue;
+        }
+        if (ty.kind === "union") {
+          let f = ty.types.find(n => typeNodes[n].kind === "function");
+          if (f && typeNodes[f].kind === "function") {
+            func = typeNodes[f].id;
+            console.warn(`Unexpected Union type of function ${syntaxNodes[cur].text!}[${cur}], use initial node ${func}`);
+          } else {
+            console.error(`error: function Node ${syntaxNodes[cur].text}[${cur}] without function type!`);
+            continue;
+          }
+        }
+        if (ty.kind === "function") {
+          func = ty.id;
+        }
+        if (!func) {
+          console.error(`error: function Node ${syntaxNodes[cur].text}[${cur}] without function type!`);
+          continue;
+        }
+        const param = funcParam[func]?.[idx];
+        if (!param) { 
+          console.log(`Can not find Correspond param #${idx} of function ${syntaxNodes[func]?.text!}[${func}]`);
+          continue;
+        }
+
+        // 擦除边，构建新边（默认function的id不会变）
+        delete graph[cur][next];
+        graph[arg] ??= {}; graph[arg][param] = "ArgToParam";
+        source[param] ??= {}; source[param][arg] = UNKNOWN;
+        worklist.push(arg);
+        continue;
+      }
+      else if (graph[cur][next] === "initProperty") {
         // 如果是设置属性，添加属性类型
         const propName = syntaxNodes[cur]?.text;
+
+
+        if (nSet === undefined) {
+          console.warn(`initProperty on undefined type in edge ${cur}->${next}`);
+          continue;
+        }
+        if (typeNodes[nSet] === undefined || typeNodes[nSet].kind !== "object") {
+          console.warn(`initProperty on non-object type ${printType(nSet)} in edge ${cur}->${next}`);
+          continue;
+        }
+        if (!propName) {
+          console.warn(`initProperty with no propName in edge ${cur}->${next}`);
+          continue;
+        }
+
+
+        const id = newTypeNode({ kind: "object", name: typeNodes[nSet].name, id: typeNodes[nSet].id, properties: makePurePropertiesCopy(typeNodes[nSet].properties, propName, tSet)});
+        typeSet[next] = id;
+      }
+      else if (graph[cur][next] === "setProperty") {
+        // 如果是设置属性，添加属性类型
+        const propName = syntaxNodes[cur].text?.split(".").pop();
 
 
         if (nSet === undefined) {
@@ -1367,21 +1631,21 @@ function deriveVariableTypes() {
           continue;
         }
 
-
-        const id = newTypeNode({ kind: "object", name: typeNodes[nSet].name, properties: makePurePropertiesCopy(typeNodes[nSet].properties, propName, tSet)});
+        const dstty = typeNodes[next]?.kind === "object" ? typeNodes[next].properties[propName] ? mergeTypes([typeNodes[next].properties[propName], tSet]) : tSet : tSet;
+        const id = newTypeNode({ kind: "object", name: typeNodes[nSet].name, id: typeNodes[nSet].id, properties: makePurePropertiesCopy(typeNodes[nSet].properties, propName, dstty)});
         typeSet[next] = id;
       }
-      else if (graph[cur][next] === "setPramType") {
+      else if (graph[cur][next] === "setParamType") {
         // 如果是参数类型，添加参数类型
         const paramName = syntaxNodes[cur]?.text;
 
 
         if (nSet === undefined) {
-          console.warn(`setPramType on undefined type in edge ${cur}->${next}`);
+          console.warn(`setParamType on undefined type in edge ${cur}->${next}`);
           continue;
         }
         if (typeNodes[nSet] === undefined || typeNodes[nSet].kind !== "function") {
-          console.warn(`setPramType on non-function type ${printType(nSet)} in edge ${cur}->${next}`);
+          console.warn(`setParamType on non-function type ${printType(nSet)} in edge ${cur}->${next}`);
           continue;
         }
         if (!paramName) {
@@ -1390,17 +1654,17 @@ function deriveVariableTypes() {
         }
 
 
-        source[next][cur] = tSet;
-        let tylist : number[]  = [];
-        for(const srcStr in source[next]) {
-          const src = Number(srcStr);
-          const curParamName = syntaxNodes[cur]?.text;
-          if (curParamName !== paramName) continue;
-          tylist.push(source[next][src]);
-        }
-        typeSet[next] = newTypeNode({ kind: "function", params: [...typeNodes[nSet].params.filter(pa => pa.name !== paramName), {name: paramName, type: mergeTypes(tylist)}], returnType: typeNodes[nSet].returnType });
+        // source[next][cur] = tSet;
+        // let tylist : number[]  = [];
+        // for(const srcStr in source[next]) {
+        //   const src = Number(srcStr);
+        //   const curParamName = syntaxNodes[src]?.text;
+        //   if (curParamName !== paramName) continue;
+        //   tylist.push(source[next][src]);
+        // }
+        typeSet[next] = newTypeNode({ kind: "function", name: typeNodes[nSet].name, id: typeNodes[nSet].id, params: [...typeNodes[nSet].params.filter(pa => pa.name !== paramName), {name: paramName, type: /* mergeTypes(tylist) */tSet}], returnType: typeNodes[nSet].returnType });
       }
-      else if (graph[cur][next] === "returnType" || graph[cur][next] === "returnAnnotation") {
+      else if (graph[cur][next] === "returnType"/*  || graph[cur][next] === "returnAnnotation" */) {
         // 如果是返回类型，添加返回类型
         if (nSet === undefined) {
           console.warn(`returnType or returnAnnotation on undefined type in edge ${cur}->${next}`);
@@ -1413,7 +1677,7 @@ function deriveVariableTypes() {
 
         
         source[next][cur] = tSet;
-        typeSet[next] = newTypeNode({ kind: "function", params: typeNodes[nSet].params, returnType: mergeBranches(next, ["returnType", "returnAnnotation"]) });
+        typeSet[next] = newTypeNode({ kind: "function", name: typeNodes[nSet].name, id: typeNodes[nSet].id, params: typeNodes[nSet].params, returnType: mergeBranches(next, ["returnType"/* , "returnAnnotation" */]) });
       }
 
 
@@ -1442,6 +1706,7 @@ function union(x: number, y: number) {
   const rootY = find(y);
   if (rootX !== rootY) {
     parent[rootX] = rootY;
+    funcParam[rootX] = funcParam[rootY];
   }
 }
 
@@ -1455,9 +1720,112 @@ function mergeIdentifiers() {
   }
 }
 
+// 验证 groundtruth
+function evaluate() {
+  console.log("========== Evaluating type graph consistency ==========");
+
+  const result = {
+    total: 0,
+    correct: 0,
+    wrong: 0,
+    missing: 0,
+    any: 0, // 统计any出现次数
+    unknown: 0, // 统计无法判断类型的注释出现次数
+    wrongEdges: [] as { kind: string, a: number, b: number, aType: string, bType: string }[],
+  };
+
+  // 遍历类型图中的所有约束
+  for (const [kind, a, b] of allConstraints) {
+    if (kind !== "annotation" && kind !== "returnAnnotation") continue;
+
+    const aId = find(Number(a));
+    const bId = find(Number(b));
+    result.total++;
+
+
+    let aType =  printType(typeSet[aId] ?? UNKNOWN);
+    if (kind === "returnAnnotation") {
+      const ty = typeNodes[typeSet[aId]];
+      if (ty && ty.kind === "function") {
+        const retType = ty.returnType;
+        aType = printType(retType)
+      }
+    }
+    const bType = printType(typeSet[bId] ?? UNKNOWN);
+
+    // === (1) 跳过 other 类型比较 ===
+    const isAny = (t: string) => /^any(\[\])?$/.test(t);
+    if (isAny(bType)) {
+      result.any++;
+      continue; // 不计入正确或错误
+    } else if(bType === "unknown") {
+      result.unknown++;
+      console.log(`${[kind, a, b]}`)
+      continue;
+    }
+
+    // === (2) 比较类型一致性 ===
+    if (aType === "unknown") {
+      result.missing++;
+      result.wrongEdges.push({ kind, a: aId, b: bId, aType, bType });
+      // console.warn(`[EVAL] Can not predict type on ${kind} edge ${aId}->${bId}, expected ${bType}`);
+    } else if (aType === bType) {
+      result.correct++;
+      console.log(`[EVAL] Match on ${kind} edge ${syntaxNodes[aId].text}[${aId}]->${syntaxNodes[bId].text}[${bId}]: ${bType}`);
+    } else {
+      result.wrong++;
+      result.wrongEdges.push({ kind, a: aId, b: bId, aType, bType });
+      // console.warn(`[EVAL] Mismatch on ${kind} edge ${aId}->${bId}: inferred ${aType}, expected ${bType}`);
+    }
+  }
+
+  // === (3) 输出汇总报告 ===
+  const other = result.any + result.unknown;
+  const acc = result.correct / Math.max(1, (result.total - other - result.missing));
+  const cov = (result.correct + result.wrong) / (result.total - other);
+  console.log("========== Evaluation Report ==========");
+  console.log(`Total annotations: ${result.total}`);
+  console.log(`Correct: ${result.correct}`);
+  console.log(`Wrong: ${result.wrong}`);
+  console.log(`Missing: ${result.missing}`);
+  console.log(`Ignored: any * ${result.any} + unknown * ${result.unknown} = ${other}`);
+  console.log(`coverage: ${(cov * 100).toFixed(2)}%`);
+  console.log(`Effective accuracy: ${(acc * 100).toFixed(2)}%`);
+
+  // === (4) 输出详细错误列表 ===
+  if (result.wrongEdges.length > 0) {
+    console.log("\n--- Type mismatches ---");
+    for (const w of result.wrongEdges) {
+      const aText = syntaxNodes[w.a]?.text ?? `(node ${w.a})`;
+      const bText = syntaxNodes[w.b]?.text ?? `(node ${w.b})`;
+      if (w.aType === "unknown") continue;
+      console.log(
+        `  [${w.kind}] ${aText}[${w.a}] (${w.aType})  !==  ${bText} (${w.bType})`
+      );
+    }
+  }
+
+  // === (5) 输出遗漏列表 ===
+  if (result.wrongEdges.length > 0) {
+    console.log("\n--- Type underived ---");
+    for (const w of result.wrongEdges) {
+      const aText = syntaxNodes[w.a]?.text ?? `(node ${w.a})`;
+      const bText = syntaxNodes[w.b]?.text ?? `(node ${w.b})`;
+      if (w.aType !== "unknown") continue;
+      console.log(
+        `  [${w.kind}] ${aText}[${w.a}] (${w.aType})  !==  ${bText} (${w.bType})`
+      );
+    }
+  }
+
+  return result;
+}
+
+
 // 输出图和约束
 function emitGlobalTypeGraphAndConstraints() {
   const types = deriveVariableTypes();
+  evaluate();
 
   const outDir = path.join(outputDir, "typegraph");
   fs.mkdirSync(outDir, { recursive: true });
@@ -1566,6 +1934,7 @@ function main() {
 
   mergeIdentifiers();
   emitGlobalTypeGraphAndConstraints();
+  analyzeIdentifierTypeFeatures();
 }
 
 // 递归获取所有 AST 文件
@@ -1581,3 +1950,88 @@ function getAstFiles(dir: string): string[] {
 }
 
 main();
+
+// ===== 基于变量节点的类型特征分析 =====
+function analyzeIdentifierTypeFeatures() {
+  console.log("📊 Identifier Type Feature Analysis Starting...");
+
+  const stats = {
+    primitive: 0,
+    object: 0,
+    func: 0,
+    array: 0,
+    union: 0,
+    unknown: 0,
+    funcParamTotal: 0,
+    funcCount: 0,
+    crossFileRefs: 0,
+    totalNodes: 0,
+  };
+
+  // 只保留 Identifier 节点
+  const identifierNodes = Object.entries(syntaxNodes)
+    .filter(([_, node]) => node.kind === "Identifier")
+    .map(([id]) => Number(id));
+
+  for (const id of identifierNodes) {
+    const tyId = typeSet[id] ?? UNKNOWN;
+    const tyNode = typeNodes[tyId];
+
+    stats.totalNodes++;
+
+    if (!tyNode) {
+      stats.unknown++;
+    } else {
+      switch (tyNode.kind) {
+        case "primitive": if(tyNode.name !== "unknown") stats.primitive++; else stats.unknown++; break;
+        case "object": stats.object++; break;
+        case "function":
+          stats.func++;
+          stats.funcCount++;
+          stats.funcParamTotal += tyNode.params?.length || 0;
+          break;
+        case "array": stats.array++; break;
+        case "union": stats.union++; break;
+      }
+    }
+  }
+
+  // 跨文件引用统计：只要一条边跨文件，就算一次
+  for (const [srcStr, dsts] of Object.entries(graph)) {
+    const src = Number(srcStr);
+    const srcFile = syntaxNodes[src]?.file;
+    if (!srcFile) continue;
+
+    for (const dstStr in dsts) {
+      const dst = Number(dstStr);
+      const dstFile = syntaxNodes[dst]?.file;
+      if (!dstFile || srcFile === dstFile) continue;
+      stats.crossFileRefs++;
+    }
+  }
+
+  const result = {
+    totalNodes: stats.totalNodes,
+    primitive: { count: stats.primitive, percent: ((stats.primitive / stats.totalNodes) * 100).toFixed(1) },
+    object: { count: stats.object, percent: ((stats.object / stats.totalNodes) * 100).toFixed(1) },
+    function: { count: stats.func, percent: ((stats.func / stats.totalNodes) * 100).toFixed(1) },
+    array: { count: stats.array, percent: ((stats.array / stats.totalNodes) * 100).toFixed(1) },
+    union: { count: stats.union, percent: ((stats.union / stats.totalNodes) * 100).toFixed(1) },
+    unknown: { count: stats.unknown, percent: ((stats.unknown / stats.totalNodes) * 100).toFixed(1) },
+    "avg function params": (stats.funcParamTotal / (stats.funcCount || 1)).toFixed(2),
+    "cross-file refs ": stats.crossFileRefs,
+  };
+
+  // 控制台输出
+  console.log("========== Identifier Type Feature Report ==========");
+  console.log(`Total Identifier nodes: ${result.totalNodes}`);
+  for (const [k, v] of Object.entries(result)) {
+    if (typeof v === "object") {
+      console.log(`${k.padEnd(22)} ${v.count} nodes, ${v.percent}%`);
+    } else {
+      console.log(`${k.padEnd(22)} ${v}`);
+    }
+  }
+
+  return result;
+}

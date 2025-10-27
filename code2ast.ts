@@ -62,7 +62,7 @@ function findFileInRoots(rootDirs: string[], targetFileName: string): string | n
 function findFileRecursive(rootDir: string, targetFileName: string): string | null {
   if (!fs.existsSync(rootDir)) return null;
 
-  const suffixes = [".ts", ".js", ".ets", ".tsx", ".d.ts", ".d.ets"];
+  const suffixes = [".ts", ".js", ".ets", ".tsx", ".d.ts", ".d.ets", ".android.bundle"];
 
   // 检查 rootDir 目录本身是否包含目标文件（带后缀）
   for (const suffix of suffixes) {
@@ -120,6 +120,24 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
         const baseDir = path.dirname(currentFile);
         fullPath = findFileInRoots([path.resolve(baseDir)], importPath);
         isNextSDK = isSDK;
+
+        // 如果 fullPath 是目录，尝试解析 index.xxx
+        if (fullPath && fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory()) {
+          const candidates = ["index.ts", "index.tsx", "index.js", "index.jsx", "index.ets"];
+          let resolved: string | null = null;
+          for (const f of candidates) {
+            const candidate = path.join(fullPath, f);
+            if (fs.existsSync(candidate)) {
+              resolved = candidate;
+              break;
+            }
+          }
+          if (resolved) {
+            fullPath = resolved;
+          } else {
+            console.warn(`Cannot resolve entry file in directory: ${fullPath}`);
+          }
+        }
       } else if (importPath.startsWith("@")) {
         fullPath = findFileInRoots(SDKRoots, importPath);
         isNextSDK = true;
@@ -174,6 +192,7 @@ function dumpFile(filePath: string | null, isSDK = false, kitImports : string[] 
   }
   fs.mkdirSync(path.dirname(outputFilePath), { recursive: true });
   fs.writeFileSync(outputFilePath, JSON.stringify(astJson, null, 2), "utf8");
+  // writeJsonStream(outputFilePath, astJson);
   console.log(`AST dumped: ${outputFilePath}`);
   if (importPath !== "") globalImportMap.set(importPath, outputFilePath); 
 }
@@ -185,7 +204,7 @@ function collectSourceFiles(dir: string): string[] {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       files = files.concat(collectSourceFiles(fullPath));
-    } else if (entry.name.match(/\.(ts|tsx|js|ets)$/)) {
+    } else if (entry.name.match(/\.(ts|tsx|js|ets|bundle)$/)) {
       files.push(fullPath);
     }
   }
