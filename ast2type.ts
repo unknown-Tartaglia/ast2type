@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { Command } from "commander";
-import { ts, UnionTypeNode } from "ts-morph";
+import { ExportDeclaration, ts, UnionTypeNode } from "ts-morph";
 
 // 命令行参数解析
 const program = new Command();
@@ -67,6 +67,7 @@ let typeVarCounter = 100;
 const cnt: Record<number, number> = {};
 const fileToAst: Record<string, AstNode> = {};
 const globalExportMap: Record<string, Record<string, number>> = {};
+const globalExportFa: Record<string, Record<string, string[]>> = {};
 const syntaxNodes: Record<number, { kind: string; text?: string; file?: string; position?: any }> = {};
 const typeNodes: Record<number, TypeNode> = {};
 const allConstraints: Array<[string, number, number, string]> = [];
@@ -435,7 +436,9 @@ function firstPass(filePath: string, ast: AstNode) {
         globalExportMap[realPath] ??= {};
         for (const idNode of idNodes) 
           if (idNode.children && idNode.children.length > 0 && idNode.children[0].kind === "Identifier" && idNode.children[0].text){
-          globalExportMap[realPath][idNode.children[0].text] = idNode.varId!;
+            globalExportMap[realPath][idNode.children[0].text] = idNode.children[0].varId!;
+            if (idNode.children.length === 3 && idNode.children[1].kind === "FirstAssignment")
+              allConstraints.push(["sameType", idNode.children[0].varId!, idNode.children[2].varId!, `${idNode.text}`])
         }
         // 处理default
         if (dftkwd && idNodes.length === 1) {
@@ -462,9 +465,13 @@ function firstPass(filePath: string, ast: AstNode) {
         const idNodes = findNodesByKind(node, "ExportSpecifier");
         if (idNodes.length > 0) {
           globalExportMap[realPath] ??= {};
-          for (const idNode of idNodes) 
-            if (idNode.children && idNode.children.length > 0 && idNode.children[0].kind === "Identifier" && idNode.children[0].text){
-            globalExportMap[realPath][idNode.children[0].text] = idNode.varId!;
+            for (const idNode of idNodes) {
+              if (idNode.children && idNode.children.length === 3 && idNode.children[2].kind === "Identifier" && idNode.children[2].text) {
+                globalExportMap[realPath][idNode.children[2].text] = idNode.children[2].varId!;
+                allConstraints.push(["sameType", idNode.children[2].varId!, idNode.children[0].varId!, `${idNode.text}`]);
+              } else if (idNode.children && idNode.children.length === 1 && idNode.children[0].kind === "Identifier" && idNode.children[0].text) {
+                globalExportMap[realPath][idNode.children[0].text] = idNode.children[0].varId!;
+              }
           }
         }
       }
@@ -473,6 +480,28 @@ function firstPass(filePath: string, ast: AstNode) {
         globalExportMap[realPath][dftkwd.text!] = dftkwd.varId!;
         allConstraints.push(["sameType", dftkwd.varId!, idNode.varId!, "default keyword"]);
         // TODO: 判断是否只有一个default
+      }
+
+      // export xxx from file
+      const idx = node.children.findIndex(n => n.kind === "FromKeyword");
+      if (idx && idx !== -1) {
+        const f = node.children[idx + 1];
+        if (!f || !f.text) {
+          console.error(`export xxx from no file`);
+        } else {
+          const dst = resolveImportPath(filePath, f.text.replace(/^['"]|['"]$/g, ""));
+
+          if (dst) {
+            if (node.children.find(n => n.kind === "AsterisToken")) {
+              globalExportFa[realPath] ??= {};
+              globalExportFa[realPath]["*"] ??= [];
+              globalExportFa[realPath]["*"].push(dst);
+              // console.log(`+++ ${dst} to ${realPath}`)
+            }
+          }
+          if (LOG_IMPORT && !dst)
+            console.error(`can not resolve ${f.text} at ${filePath}`);
+        }
       }
     }
   }
@@ -909,10 +938,103 @@ function secondPass(filePath: string, node: AstNode) {
         if (target !== undefined) {
           allConstraints.push(["sameType", idNode.varId!, target, `Success import ${symbol} from ${moduleSpecifier}`]);
         } else {
-          if (LOG_IMPORT)
-            console.warn(`Symbol ${symbol} not found in export map of ${resolvedFile} in ${filePath}`);
-          allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${symbol} from ${moduleSpecifier}`]);
+          // export xxx from file
+          function findfa(file: string) : number | undefined {
+            for (let dst of globalExportFa[file]?.[symbol] || []) {
+              console.log(`now in ${dst} finding ${symbol} at ${file}`);
+              if (globalExportMap[dst]?.[symbol]) {
+                globalExportMap[file] ??= {};
+                globalExportMap[file][symbol] = globalExportMap[dst][symbol];
+                return globalExportMap[dst][symbol];
+              }
+              else return findfa(dst);
+            }
+            for (let dst of globalExportFa[file]?.["*"] || []) {
+              console.log(`now in ${dst} finding ${symbol} at ${file}`);
+              if (globalExportMap[dst]?.[symbol]) {
+                globalExportMap[file] ??= {};
+                globalExportMap[file][symbol] = globalExportMap[dst][symbol];
+                return globalExportMap[dst][symbol];
+              }
+              const res = findfa(dst);
+              if (res) return res;
+            }
+            return undefined;
+          }
+          const ret = findfa(resolvedFile);
+          if (ret) {
+            allConstraints.push(["sameType", idNode.varId!, ret, `Asesome! Success import ${symbol}(*) from ${moduleSpecifier}`]);
+          } else {
+            if (LOG_IMPORT)
+              console.warn(`Symbol ${symbol} not found in export map of ${resolvedFile} in ${filePath}`);
+            allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${symbol} from ${moduleSpecifier}`]);
+          }
         }
+      }
+    },
+    // 处理export xxx from xxx
+    ExportDeclaration(node) {
+      const raw = node.children?.find(n => n.kind === "StringLiteral")?.text;
+      const moduleSpecifier = raw?.replace(/^['"]|['"]$/, ""); // 去掉引号
+      if (!moduleSpecifier) {
+        if (LOG_IMPORT)
+          console.warn(`ImportDeclaration in ${filePath} has no moduleSpecifier`);
+        return;
+      }
+      const resolvedFile = resolveImportPath(filePath, moduleSpecifier);
+      
+      const ndepts = node?.children?.find(c => c.kind === "NamedExports");
+      if (ndepts) {
+        const expts = findNodesByKind(ndepts, "ExportSpecifier");
+        for (const expt of expts)
+          if (expt.children && expt.children.length > 0 && expt.children[0].kind === "Identifier" && expt.children[0].text) {
+            const idNode = expt.children[0];
+            const symbol = idNode.text!;
+            varBindings.set(symbol, idNode.varId!);
+            if (!resolvedFile) {
+              if (LOG_IMPORT)
+                console.warn(`can not resolve import ${moduleSpecifier} in ${filePath}`);
+              allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${symbol} from ${moduleSpecifier}`]);
+              continue;
+            }
+
+            const target = globalExportMap[resolvedFile]?.[symbol] === undefined? globalExportMap[resolvedFile]?.["default"] : globalExportMap[resolvedFile]?.[symbol];
+            if (target !== undefined) {
+              allConstraints.push(["sameType", idNode.varId!, target, `Success import ${symbol} from ${moduleSpecifier}`]);
+            } else {
+              // export xxx from file
+              function findfa(file: string) : number | undefined {
+                for (let dst of globalExportFa[file]?.[symbol] || []) {
+                  console.log(`now in ${dst} finding ${symbol} at ${file}`);
+                  if (globalExportMap[dst]?.[symbol]) {
+                    globalExportMap[file] ??= {};
+                    globalExportMap[file][symbol] = globalExportMap[dst][symbol];
+                    return globalExportMap[dst][symbol];
+                  }
+                  else return findfa(dst);
+                }
+                for (let dst of globalExportFa[file]?.["*"] || []) {
+                  console.log(`now in ${dst} finding ${symbol} at ${file}`);
+                  if (globalExportMap[dst]?.[symbol]) {
+                    globalExportMap[file] ??= {};
+                    globalExportMap[file][symbol] = globalExportMap[dst][symbol];
+                    return globalExportMap[dst][symbol];
+                  }
+                  const res = findfa(dst);
+                  if (res) return res;
+                }
+                return undefined;
+              }
+              const ret = findfa(resolvedFile);
+              if (ret) {
+                allConstraints.push(["sameType", idNode.varId!, ret, `Asesome! Success import ${symbol}(*) from ${moduleSpecifier}`]);
+              } else {
+                if (LOG_IMPORT)
+                  console.warn(`Symbol ${symbol} not found in export map of ${resolvedFile} in ${filePath}`);
+                allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${symbol} from ${moduleSpecifier}`]);
+              }
+            }
+          }
       }
     }
   }
@@ -1095,6 +1217,9 @@ function secondPass(filePath: string, node: AstNode) {
         if (exprNode.varId !== undefined) {
           if (operator.kind === "ExclamationToken") {
             allConstraints.push(["hasType", node.varId!, BOOLEAN, `!${exprNode.text!} ∈ boolean`]);
+            allConstraints.push(["refersTo", node.varId!, exprNode.varId!, `!${exprNode.text!}`]);
+          } else if (operator.kind === "MinusToken") {
+            allConstraints.push(["sameType", node.varId!, exprNode.varId!, `-${exprNode.text!}`]);
             allConstraints.push(["refersTo", node.varId!, exprNode.varId!, `!${exprNode.text!}`]);
           }
         }
@@ -1368,37 +1493,7 @@ function secondPass(filePath: string, node: AstNode) {
     }
   }
 
-  // 解析导入路径
-  function resolveImportPath(currentFilePath: string, importSpecifier: string): string | undefined {
-    if (importSpecifier.startsWith(".")) {
-      // 本地模块：相对路径 + 补后缀
-      const realCurrentPath = path.basename(currentFilePath).replace(/\^/g, "\\").replace(/\.ast\.json/g, "");
-      const absbase = path.resolve(path.dirname(realCurrentPath), importSpecifier);
-      const base = path.relative(process.cwd(), absbase);
-      for (const extname of ["", ".ts", ".js", ".ets", ".tsx", ".d.ts", ".d.ets"]) {
-        const ret = base + extname;
-        if (fs.existsSync(path.join(path.dirname(currentFilePath), ret.replace(/\\/g, "^") + ".ast.json")))
-          return ret;
-        console.error(`base: ${path.join(path.dirname(currentFilePath), ret.replace(/\\/g, "^"))}`);
-      }
-      return undefined
-    } else {
-      // 外部模块 or 内建模块
-      if (LOG_IMPORT)
-        console.log(`Resolving external import: ${importSpecifier} in ${currentFilePath}`);
-      // try {
-      //   return require.resolve(importSpecifier, { paths: [path.dirname(currentFilePath)] });
-      // } catch {
-      //   return undefined;
-      // }
-      if (!importSpecifier.startsWith("@"))
-        importSpecifier = importSpecifier.split("/")[0];
-      if (globalImportMap.has(importSpecifier)) {
-        // console.log(`${path.basename(globalImportMap.get(importSpecifier)!).replace(/\^/g, "\\").replace(/\.ast\.json/g, "")}`);
-        return path.basename(globalImportMap.get(importSpecifier)!).replace(/\^/g, "\\").replace(/\.ast\.json/g, "");
-      }
-    }
-  }
+
 
   function walk(node: AstNode) {
     const id = node.varId;
@@ -1430,6 +1525,41 @@ function secondPass(filePath: string, node: AstNode) {
       // 如果已经存在，合并类型
       // const existingId = globalVarBindings.get(name)!;
       // allConstraints.push(["sameType", existingId, id, `merge type for ${name}`]);
+    }
+  }
+}
+
+// 解析导入路径
+function resolveImportPath(currentFilePath: string, importSpecifier: string): string | undefined {
+  if (importSpecifier.startsWith(".")) {
+    // 本地模块：相对路径 + 补后缀
+    const realCurrentPath = path.basename(currentFilePath).replace(/\^/g, "\\").replace(/\.ast\.json/g, "");
+    const absbase = path.resolve(path.dirname(realCurrentPath), importSpecifier);
+    const base = path.relative(process.cwd(), absbase);
+    for (const extname of ["", ".ts", ".js", ".ets", ".tsx", ".d.ts", ".d.ets"]) {
+      let ret = base + extname;
+      if (fs.existsSync(path.join(path.dirname(currentFilePath), ret.replace(/\\/g, "^") + ".ast.json")))
+        return ret;
+      ret = base + "\\index" + extname;
+      if (fs.existsSync(path.join(path.dirname(currentFilePath), ret.replace(/\\/g, "^") + ".ast.json")))
+        return ret;
+      // console.error(`base: ${path.join(path.dirname(currentFilePath), ret.replace(/\\/g, "^"))}`);
+    }
+    return undefined
+  } else {
+    // 外部模块 or 内建模块
+    if (LOG_IMPORT)
+      console.log(`Resolving external import: ${importSpecifier} in ${currentFilePath}`);
+    // try {
+    //   return require.resolve(importSpecifier, { paths: [path.dirname(currentFilePath)] });
+    // } catch {
+    //   return undefined;
+    // }
+    if (!importSpecifier.startsWith("@"))
+      importSpecifier = importSpecifier.split("/")[0];
+    if (globalImportMap.has(importSpecifier)) {
+      // console.log(`${path.basename(globalImportMap.get(importSpecifier)!).replace(/\^/g, "\\").replace(/\.ast\.json/g, "")}`);
+      return path.basename(globalImportMap.get(importSpecifier)!).replace(/\^/g, "\\").replace(/\.ast\.json/g, "");
     }
   }
 }
@@ -1497,7 +1627,8 @@ function deriveVariableTypes() {
 
 
       //  数据流处理
-      if (graph[cur][next] === "sameType" || graph[cur][next] === "ArgToParam" /*|| graph[cur][next] === "annotation"*/) {
+      if (graph[cur][next] === "sameType" || graph[cur][next] === "ArgToParam" || graph[cur][next] === "annotation") {
+        if (graph[cur][next] === "annotation" && syntaxNodes[cur].file && !path.relative(process.cwd(), syntaxNodes[cur].file).split(path.sep).includes("sdk")) continue;
         // 如果是同类型
         source[next][cur] = tSet;
         typeSet[next] = mergeBranches(next);
@@ -1664,7 +1795,8 @@ function deriveVariableTypes() {
         // }
         typeSet[next] = newTypeNode({ kind: "function", name: typeNodes[nSet].name, id: typeNodes[nSet].id, params: [...typeNodes[nSet].params.filter(pa => pa.name !== paramName), {name: paramName, type: /* mergeTypes(tylist) */tSet}], returnType: typeNodes[nSet].returnType });
       }
-      else if (graph[cur][next] === "returnType"/*  || graph[cur][next] === "returnAnnotation" */) {
+      else if (graph[cur][next] === "returnType" || graph[cur][next] === "returnAnnotation") {
+        if (graph[cur][next] === "returnAnnotation" && syntaxNodes[cur].file && !path.relative(process.cwd(), syntaxNodes[cur].file).split(path.sep).includes("sdk")) continue;
         // 如果是返回类型，添加返回类型
         if (nSet === undefined) {
           console.warn(`returnType or returnAnnotation on undefined type in edge ${cur}->${next}`);
@@ -1740,6 +1872,8 @@ function evaluate() {
 
     const aId = find(Number(a));
     const bId = find(Number(b));
+    // 不统计库文件
+    if (!syntaxNodes[aId].file || path.relative(process.cwd(), syntaxNodes[aId].file).split(path.sep).includes("sdk")) continue;
     result.total++;
 
 
@@ -1970,7 +2104,7 @@ function analyzeIdentifierTypeFeatures() {
 
   // 只保留 Identifier 节点
   const identifierNodes = Object.entries(syntaxNodes)
-    .filter(([_, node]) => node.kind === "Identifier")
+    .filter(([_, node]) => node.kind === "Identifier" && node.file && !path.relative(process.cwd(), node.file).split(path.sep).includes("sdk"))
     .map(([id]) => Number(id));
 
   for (const id of identifierNodes) {

@@ -14,7 +14,7 @@ const options = program.opts();
 
 const fallbackInputDir = path.resolve("./");
 const userInputDir = options.input ? path.resolve(options.input) : fallbackInputDir;
-const outputDir = options.output ? path.resolve(options.output) : path.resolve("./output/ast");
+const outputDir = options.output ? path.resolve(options.output + "/ast") : path.resolve(options.input + "_output/ast");
 
 const project = new Project({
   tsConfigFilePath: path.resolve("./tsconfig.json"),
@@ -68,14 +68,14 @@ function findFileRecursive(rootDir: string, targetFileName: string): string | nu
   for (const suffix of suffixes) {
     const directPath = path.join(rootDir, targetFileName + suffix);
     if (fs.existsSync(directPath)) {
-      console.log(`Find import file ${directPath}`);
+      // console.log(`Find import file ${directPath}`);
       return directPath;
     }
   }
 
   // 如果 rootDir 本身名称等于 targetFileName（作为模块处理）
   if (fs.existsSync(path.join(rootDir, targetFileName))) {
-    console.log(`Find import file module ${path.join(rootDir, targetFileName)}`);
+    // console.log(`Find import file module ${path.join(rootDir, targetFileName)}`);
     return path.join(rootDir, targetFileName);
   }
 
@@ -105,20 +105,20 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
     kind: SyntaxKind[node.getKind()],
   };
 
-  if (node.getKind() === SyntaxKind.ImportDeclaration) {
+  if (node.getKind() === SyntaxKind.ImportDeclaration || node.getKind() === SyntaxKind.ExportDeclaration) {
     const str = node.getChildren().find(c => c.getKind() === SyntaxKind.StringLiteral);
     const imptsNodes = findNodesByKind(node, SyntaxKind.Identifier);
     const impts = imptsNodes?.map(n => n.getText());
 
-    if (str && (kitImports.length === 0 || kitImports.filter(impt => impts.includes(impt)).length > 0)) {
+    if (str && (kitImports.length === 0 || kitImports.filter(impt => impts.includes(impt)).length > 0 || node.getChildren().find(c => c.getKind() === SyntaxKind.AsteriskToken))) {
       let importPath = str.getText().replace(/['"]/g, "");
       const currentFile = node.getSourceFile().getFilePath();
       let fullPath: string | null = null;
-      let newKitImports : string[] = [];
+      let newKitImports : string[] = kitImports;
       let isNextSDK = false;
       if (importPath.startsWith(".")) {
         const baseDir = path.dirname(currentFile);
-        fullPath = findFileInRoots([path.resolve(baseDir)], importPath);
+        fullPath = path.resolve(baseDir, importPath);
         isNextSDK = isSDK;
 
         // 如果 fullPath 是目录，尝试解析 index.xxx
@@ -137,19 +137,97 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
           } else {
             console.warn(`Cannot resolve entry file in directory: ${fullPath}`);
           }
+        } else {
+          const suffixes = ["", ".ts", ".js", ".ets", ".tsx", ".d.ts", ".d.ets", ".android.bundle"];
+          let resolved = null;
+          for (const ext of suffixes) {
+            const candidate = fullPath + ext;
+            if (fs.existsSync(candidate)) {
+              resolved = candidate;
+              break;
+            }
+          }
+          if (resolved) {
+            fullPath = resolved;
+          } else {
+            console.warn(`cannot find import ${importPath} at path ${fullPath}`);
+            fullPath = null;
+          }
         }
-      } else if (importPath.startsWith("@")) {
+      } else {
         fullPath = findFileInRoots(SDKRoots, importPath);
         isNextSDK = true;
         if(importPath.startsWith("@kit"))
           newKitImports = impts;
-      } else {
-        // mobileimsdk/Index视为mobileimsdk
-        importPath = importPath.split("/")[0];
-        fullPath = findFileInRoots([userInputDir], "oh_modules/" + importPath);
-        if (fullPath) fullPath = fullPath + "\\Index.d.ets";
+
+        // 如果 fullPath 是目录
+        if (fullPath && fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory()) {
+          const pkgPath = path.join(fullPath, "package.json");
+          let resolved: string | null = null;
+          let fail = true;
+
+          // 先解析pkg
+          if (fs.existsSync(pkgPath)) {
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+            const mainField = pkg.module || pkg.main;
+            if (mainField && typeof mainField === "string") {
+              const mainFull = path.resolve(fullPath, mainField);
+              if (fs.existsSync(mainFull)) {
+                if (!fs.statSync(mainField).isDirectory()) {
+                  resolved = mainFull;
+                  fullPath = resolved;
+                  fail = false;
+                  // console.log(`resolve entry via package.json : ${resolved}`);
+                } else {
+                  const suffixes = ["", ".ts", ".js", ".ets", ".tsx", ".d.ts", ".d.ets", ".android.bundle"];
+                  for (const ext of suffixes) {
+                    const candidate = path.join(mainFull, "index") + ext;
+                    if (fs.existsSync(candidate)) {
+                      resolved = candidate;
+                      break;
+                    }
+                  }
+                  if (resolved) {
+                    fullPath = resolved;
+                    fail = false;
+                    // console.log(`resolve entry via package.json : ${resolved}`);
+                  }
+                }
+              } else {
+                const suffixes = [".ts", ".js", ".ets", ".tsx", ".d.ts", ".d.ets", ".android.bundle"];
+                for (const ext of suffixes) {
+                  const candidate = mainFull + ext;
+                  if (fs.existsSync(candidate)) {
+                    resolved = candidate;
+                    break;
+                  }
+                }
+                if (resolved) {
+                  fullPath = resolved;
+                  fail = false;
+                }
+              }
+            }
+          }
+          // 没成功就解析index
+          if (fail) {
+            const suffixes = [".ts", ".js", ".ets", ".tsx", ".d.ts", ".d.ets", ".android.bundle"];
+            for (const ext of suffixes) {
+              const candidate = path.join(fullPath, "index") + ext;
+              if (fs.existsSync(candidate)) {
+                resolved = candidate;
+                break;
+              }
+            }
+            if (resolved) {
+              fullPath = resolved;
+              fail = false;
+            }
+          }
+          // 都失败
+          if (fail) console.warn(`Cannot resolve entry file in directory: ${fullPath}`);
+        }
       }
-      console.log(`processing import ${node.getText()}: find path ${fullPath}`)
       dumpFile(fullPath, isNextSDK, newKitImports, importPath);
     }
   }
@@ -172,10 +250,15 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
 }
 
 function dumpFile(filePath: string | null, isSDK = false, kitImports : string[] = [], importPath : string = "") {
-  if (!filePath || !fs.existsSync(filePath)) return;
+  if (!filePath) return;
   const absPath = path.resolve(filePath);
   if (visitedFiles.has(absPath)) return;
+  if (!fs.existsSync(filePath)) {
+    console.log(`no file ${filePath}`)
+    return;
+  }
   visitedFiles.add(absPath);
+  console.log(`AST dumping: ${absPath}`);
   const sourceFile = project.addSourceFileAtPath(absPath);
   const astJson = serializeNode(sourceFile, isSDK, kitImports);
   let relativePath : string;
@@ -186,14 +269,14 @@ function dumpFile(filePath: string | null, isSDK = false, kitImports : string[] 
     outputFilePath = path.join(outputDir, outputFileName);
   }
   else {
-    relativePath = path.relative("D:\\DevEco Studio\\sdk\\default\\openharmony\\ets\\", absPath);
+    relativePath = absPath.replace(/[:]g/, "");
     const outputFileName = relativePath.replace(/[\/\\]/g, "^") + ".ast.json";
     outputFilePath = path.join(outputDir + "/sdk", outputFileName);
   }
   fs.mkdirSync(path.dirname(outputFilePath), { recursive: true });
   fs.writeFileSync(outputFilePath, JSON.stringify(astJson, null, 2), "utf8");
   // writeJsonStream(outputFilePath, astJson);
-  console.log(`AST dumped: ${outputFilePath}`);
+  // console.log(`AST dumped: ${outputFilePath}`);
   if (importPath !== "") globalImportMap.set(importPath, outputFilePath); 
 }
 
@@ -239,7 +322,7 @@ function main() {
   console.log(`Found ${srcFiles.length} source files.`);
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
   for (const filePath of srcFiles) dumpFile(filePath);
-  console.log(`${[...globalImportMap.values()]}`);
+  // console.log(`${[...globalImportMap.values()]}`);
   fs.writeFileSync(path.resolve(outputDir, "../importMap.json"), JSON.stringify([...globalImportMap], null, 2), "utf8");
 }
 
