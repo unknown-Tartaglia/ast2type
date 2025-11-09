@@ -73,12 +73,9 @@ const syntaxNodes: Record<number, { kind: string; text?: string; file?: string; 
 const typeNodes: Record<number, TypeNode> = {};
 const allConstraints: Array<[string, number, number, string]> = [];
 const globalVarBindings = new Map<string, number>();
-const func2typeId = new Map<string, number>();
-const universe = new Set<string>();
 const graph: Record<number, Record<number, string>> = {};
 const source: Record<number, Record<number, number>> = {};
 const typeSet: Record<number, number> = {};
-const del: Record<number, Set<number>> = {};
 const parent: Record<number, number> = {};
 const globalImportMap : Map<string, string> = new Map(JSON.parse(fs.readFileSync(path.join(inputDir, "importMap.json"), "utf8")));
 let worklist: number[] = [];
@@ -190,47 +187,24 @@ function printFullType(n: number): string {
 
 function printJsonType(typeId: number): any {
   const node = typeNodes[typeId];
-  if (!node) return { kind: "unknown", id: typeId };
-
-  const result: any = { kind: node.kind };
+  if (!node) return "unknown";
 
   switch (node.kind) {
     case "primitive":
-      result.name = node.name;
-      break;
-
+      return node.name;
     case "union":
-      result.types = node.types.map((tid: number) =>
-        printJsonType(tid)
-      );
-      break;
-
+      return Array.from(new Set(node.types.map(t => printJsonType(t))));
     case "array":
-      result.elementType = printJsonType(node.elementType);
-      break;
-
+      return `${node.elementType}[]`;
     case "object":
-      result.name = node.name;
-      break;
-
+      return "object";
     case "enum":
-      result.name = node.name;
-      break;
-
+      return "enum";
     case "function":
-      result.name = node.name;
-      result.params = (node.params || []).map((p: any) => ({
-        name: p.name,
-        type: printJsonType(p.type),
-      }));
-      result.returnType = printJsonType(node.returnType);
-      break;
-
+      return "function"
     default:
-      result.raw = node;
+      return "unknown"
   }
-
-  return result;
 }
 
 
@@ -2047,6 +2021,11 @@ function emitGlobalTypeGraphAndConstraints() {
   const jsonOut = path.join(outDir, "typegraph.json");
   fs.writeFileSync(jsonOut, JSON.stringify(jsonGraph, null, 2), "utf8");
 
+  // 写出类型标注结果
+  const json = generateTypeAnno();
+  const outfile = path.join(outDir, "typeinfo.json");
+  fs.writeFileSync(outfile, JSON.stringify(json, null, 2), "utf8");
+
   console.log(`Done. Output written to ${outDir}`);
 
   // ===== JSON 图生成函数 =====
@@ -2068,7 +2047,7 @@ function emitGlobalTypeGraphAndConstraints() {
           fullType: printFullType(typeSet[srcId] ?? UNKNOWN),
           jsonType: printJsonType(typeSet[srcId] ?? UNKNOWN),
           text: srcVar?.text,
-          file: srcfile,
+          file: srcfile.replace(".ast.json", "").replace(/\^/g, "\\").split("\\ast\\")[1],
           position: srcVar?.position,
         });
         seen.add(srcId);
@@ -2087,7 +2066,7 @@ function emitGlobalTypeGraphAndConstraints() {
             fullType: printFullType(typeSet[dstId] ?? UNKNOWN),
             jsonType: printJsonType(typeSet[srcId] ?? UNKNOWN),
             text: dstVar?.text,
-            file: dstfile,
+            file: dstfile.replace(".ast.json", "").replace(/\^/g, "\\").split("\\ast\\")[1],
             position: dstVar?.position,
           });
           seen.add(dstId);
@@ -2098,6 +2077,24 @@ function emitGlobalTypeGraphAndConstraints() {
     }
 
     return { nodes, edges };
+  }
+
+
+  function generateTypeAnno() {
+    const outJson = [];
+    for (const idstr in syntaxNodes) {
+      const id = Number(idstr)
+      const node = syntaxNodes[id];
+      const t = printJsonType(typeSet[id] ?? UNKNOWN);
+      outJson.push({
+        exprText: node.text,
+        exprKind: node.kind,
+        location: node.position,
+        type: typeof(t) === "string" ? t : t.length === 1 ? t[0] : undefined,
+        unionTypes: typeof(t) !== "string" && t.length > 1 ? t : undefined,
+      })
+    }
+    return outJson;
   }
 }
 
