@@ -3,6 +3,8 @@ import * as path from "path";
 import { Project, SyntaxKind, Node, SourceFile } from "ts-morph";
 import { Command } from "commander";
 import JSON5 from "json5";
+import { mainModule } from "process";
+import { resolve } from "path/win32";
 
 const program = new Command();
 program
@@ -14,7 +16,7 @@ const options = program.opts();
 
 const fallbackInputDir = path.resolve("./");
 const userInputDir = options.input ? path.resolve(options.input) : fallbackInputDir;
-const outputDir = options.output ? path.resolve(options.output + "/ast") : path.resolve(options.input + "_output/ast");
+const outputDir = options.output ? path.resolve(options.output + "/ast") : path.resolve(options.input.replace(/[\\\/]+$/, "") + "_output/ast");
 
 const project = new Project({
   tsConfigFilePath: path.resolve("./tsconfig.json"),
@@ -34,12 +36,15 @@ const ignoredKinds = new Set<SyntaxKind>([
 const SDKRoots = [
   "D:\\DevEco Studio\\sdk\\default\\openharmony\\ets\\api\\",
   "D:\\DevEco Studio\\sdk\\default\\openharmony\\ets\\kits\\",
+  "E:\\type_extract\\node_modules\\",
+  "E:\\type_extract\\tests\\node_modules\\",
 ];
 let srcFiles : string[] = [];
 const globalImportMap = new Map<string, string>();
-
+const suffixes = ["", ".ts", ".js", ".mjs", ".ets", ".tsx", ".d.ts", ".d.ets", ".android.bundle"];
 const visitedFiles = new Set<string>();
 
+// 查找root下对应类型节点
 function findNodesByKind(root: Node, kind: SyntaxKind): Node[] {
   const found: Node[] = [];
   function walk(n: Node) {
@@ -50,47 +55,46 @@ function findNodesByKind(root: Node, kind: SyntaxKind): Node[] {
   return found;
 }
 
+// 在SDKroots下查找模块
 function findFileInRoots(rootDirs: string[], targetFileName: string): string | null {
   for (const dir of rootDirs) {
-    const found = findFileRecursive(dir, targetFileName);
+    const found = findFile(dir, targetFileName, true);
     if (found) return found;
   }
   console.error(`Failed to find ${targetFileName} at ${rootDirs}`);
   return null;
 }
 
-function findFileRecursive(rootDir: string, targetFileName: string): string | null {
+// 在root下递归查找文件
+function findFileRecursive(rootDir: string, targetFileName: string, allowDir: boolean): string | null {
   if (!fs.existsSync(rootDir)) return null;
 
-  const suffixes = [".ts", ".js", ".ets", ".tsx", ".d.ts", ".d.ets", ".android.bundle"];
+  // 检查 rootDir 是否包含目标文件（带后缀）
+  const ret = findFile(rootDir, targetFileName, allowDir);
+  if (ret) return ret;
 
-  // 检查 rootDir 目录本身是否包含目标文件（带后缀）
+  const entries = fs.readdirSync(rootDir, { withFileTypes: true });
+  for (const entry of entries) 
+    if (entry.isDirectory()) {
+      const result = findFileRecursive(path.join(rootDir, entry.name), targetFileName, allowDir);
+      if (result) return result;
+    }
+
+  return null;
+}
+
+// 在root目录下查找文件
+function findFile(root: string, targetFileName: string, allowDir: boolean): string | null {
+  if (!fs.existsSync(root)) return null;
+
   for (const suffix of suffixes) {
-    const directPath = path.join(rootDir, targetFileName + suffix);
+    const directPath = path.join(root, targetFileName + suffix);
     if (fs.existsSync(directPath)) {
-      // console.log(`Find import file ${directPath}`);
       return directPath;
     }
   }
 
-  // 如果 rootDir 本身名称等于 targetFileName（作为模块处理）
-  if (fs.existsSync(path.join(rootDir, targetFileName))) {
-    // console.log(`Find import file module ${path.join(rootDir, targetFileName)}`);
-    return path.join(rootDir, targetFileName);
-  }
-
-  const entries = fs.readdirSync(rootDir, { withFileTypes: true });
-
-  for (const entry of entries) {
-    const fullPath = path.join(rootDir, entry.name);
-
-    if (entry.isDirectory()) {
-      const result = findFileRecursive(fullPath, targetFileName);
-      if (result) return result;
-    }
-  }
-
-  return null;
+  return allowDir ? fs.existsSync(path.join(root, targetFileName)) ? path.join(root, targetFileName) : null : null;
 }
 
 
@@ -107,63 +111,37 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
 
   if (node.getKind() === SyntaxKind.ImportDeclaration || node.getKind() === SyntaxKind.ExportDeclaration) {
     const str = node.getChildren().find(c => c.getKind() === SyntaxKind.StringLiteral);
-    const imptsNodes = findNodesByKind(node, SyntaxKind.Identifier);
+    const imptsNodes = findNodesByKind(node, SyntaxKind.Identifier).concat(findNodesByKind(node, SyntaxKind.AsteriskToken));
     const impts = imptsNodes?.map(n => n.getText());
 
-    if (str && (kitImports.length === 0 || kitImports.filter(impt => impts.includes(impt)).length > 0 || node.getChildren().find(c => c.getKind() === SyntaxKind.AsteriskToken))) {
+    if (str && (!isSDK || kitImports.filter(impt => impts.includes(impt)).length > 0 || kitImports.includes("*") || impts.includes("*"))) {
       let importPath = str.getText().replace(/['"]/g, "");
       const currentFile = node.getSourceFile().getFilePath();
-      let fullPath: string | null = null;
-      let newKitImports : string[] = kitImports;
-      let isNextSDK = false;
+      let fullPath: string | null;
+      let newKitImports : string[] = impts;
+      let isNextSDK : boolean;
+      let resolved: string | null = null;
+
       if (importPath.startsWith(".")) {
-        const baseDir = path.dirname(currentFile);
+        const baseDir = path.parse(currentFile).dir;
         fullPath = path.resolve(baseDir, importPath);
         isNextSDK = isSDK;
 
         // 如果 fullPath 是目录，尝试解析 index.xxx
         if (fullPath && fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory()) {
-          const candidates = ["index.ts", "index.tsx", "index.js", "index.jsx", "index.ets"];
-          let resolved: string | null = null;
-          for (const f of candidates) {
-            const candidate = path.join(fullPath, f);
-            if (fs.existsSync(candidate)) {
-              resolved = candidate;
-              break;
-            }
-          }
-          if (resolved) {
-            fullPath = resolved;
-          } else {
-            console.warn(`Cannot resolve entry file in directory: ${fullPath}`);
-          }
+          resolved = findFile(fullPath, "index", false);
+          if (!resolved) console.warn(`Cannot resolve entry file in directory: ${fullPath}`);
         } else {
-          const suffixes = ["", ".ts", ".js", ".ets", ".tsx", ".d.ts", ".d.ets", ".android.bundle"];
-          let resolved = null;
-          for (const ext of suffixes) {
-            const candidate = fullPath + ext;
-            if (fs.existsSync(candidate)) {
-              resolved = candidate;
-              break;
-            }
-          }
-          if (resolved) {
-            fullPath = resolved;
-          } else {
-            console.warn(`cannot find import ${importPath} at path ${fullPath}`);
-            fullPath = null;
-          }
+          resolved = findFile(path.parse(fullPath).dir, path.parse(fullPath).name, false);
+          if (!resolved) console.warn(`cannot find import ${importPath} at path ${baseDir}, trying ${path.parse(fullPath).dir} + ${path.parse(fullPath).name}`);
         }
       } else {
         fullPath = findFileInRoots(SDKRoots, importPath);
         isNextSDK = true;
-        if(importPath.startsWith("@kit"))
-          newKitImports = impts;
 
         // 如果 fullPath 是目录
         if (fullPath && fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory()) {
           const pkgPath = path.join(fullPath, "package.json");
-          let resolved: string | null = null;
           let fail = true;
 
           // 先解析pkg
@@ -173,62 +151,40 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
             if (mainField && typeof mainField === "string") {
               const mainFull = path.resolve(fullPath, mainField);
               if (fs.existsSync(mainFull)) {
-                if (!fs.statSync(mainField).isDirectory()) {
+                // 如果不是目录，找到；否则找目录下index
+                if (!fs.statSync(mainFull).isDirectory()) {
                   resolved = mainFull;
-                  fullPath = resolved;
                   fail = false;
                   // console.log(`resolve entry via package.json : ${resolved}`);
                 } else {
-                  const suffixes = ["", ".ts", ".js", ".ets", ".tsx", ".d.ts", ".d.ets", ".android.bundle"];
-                  for (const ext of suffixes) {
-                    const candidate = path.join(mainFull, "index") + ext;
-                    if (fs.existsSync(candidate)) {
-                      resolved = candidate;
-                      break;
-                    }
-                  }
+                  resolved = findFile(mainFull, "index", false);
                   if (resolved) {
-                    fullPath = resolved;
                     fail = false;
                     // console.log(`resolve entry via package.json : ${resolved}`);
                   }
                 }
               } else {
-                const suffixes = [".ts", ".js", ".ets", ".tsx", ".d.ts", ".d.ets", ".android.bundle"];
-                for (const ext of suffixes) {
-                  const candidate = mainFull + ext;
-                  if (fs.existsSync(candidate)) {
-                    resolved = candidate;
-                    break;
-                  }
-                }
+                resolved = findFile(path.parse(mainFull).dir, path.parse(mainFull).name, false);
                 if (resolved) {
-                  fullPath = resolved;
                   fail = false;
+                  // console.log(`resolve entry via package.json : ${resolved}`);
                 }
               }
             }
           }
           // 没成功就解析index
           if (fail) {
-            const suffixes = [".ts", ".js", ".ets", ".tsx", ".d.ts", ".d.ets", ".android.bundle"];
-            for (const ext of suffixes) {
-              const candidate = path.join(fullPath, "index") + ext;
-              if (fs.existsSync(candidate)) {
-                resolved = candidate;
-                break;
-              }
-            }
+            resolved = findFile(fullPath, "index", false);
             if (resolved) {
-              fullPath = resolved;
               fail = false;
+              // console.log(`resolve entry without package.json : ${resolved}`);
             }
           }
           // 都失败
           if (fail) console.warn(`Cannot resolve entry file in directory: ${fullPath}`);
         }
       }
-      dumpFile(fullPath, isNextSDK, newKitImports, importPath);
+      dumpFile(resolved, isNextSDK, newKitImports, importPath);
     }
   }
 
@@ -269,11 +225,11 @@ function dumpFile(filePath: string | null, isSDK = false, kitImports : string[] 
     outputFilePath = path.join(outputDir, outputFileName);
   }
   else {
-    relativePath = absPath.replace(/[:]g/, "");
+    relativePath = absPath.replace(/:/, "");
     const outputFileName = relativePath.replace(/[\/\\]/g, "^") + ".ast.json";
     outputFilePath = path.join(outputDir + "/sdk", outputFileName);
   }
-  fs.mkdirSync(path.dirname(outputFilePath), { recursive: true });
+  fs.mkdirSync(path.parse(outputFilePath).dir, { recursive: true });
   fs.writeFileSync(outputFilePath, JSON.stringify(astJson, null, 2), "utf8");
   // writeJsonStream(outputFilePath, astJson);
   // console.log(`AST dumped: ${outputFilePath}`);
@@ -287,7 +243,7 @@ function collectSourceFiles(dir: string): string[] {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       files = files.concat(collectSourceFiles(fullPath));
-    } else if (entry.name.match(/\.(ts|tsx|js|ets|bundle)$/)) {
+    } else if (entry.name.match(/\.(ts|tsx|js|mjs|ets|bundle)$/)) {
       files.push(fullPath);
     }
   }

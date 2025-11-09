@@ -20,6 +20,7 @@ const LOG_TYPENODE_VERBOSE = false; // 是否开启类型节点详细日志
 const LOG_IDENTIFIER_NODE = false; // 是否开启标识符节点日志
 const LOG_IMPORT = true; // 是否开启导入日志
 const LOG_TYPE_FLOW = false; // 是否开启类型流日志
+const MERGE_IDENTIFIERS = false; // 是否合并标识符
 
 // 常量类型
 const NUMBER = 1;
@@ -185,6 +186,54 @@ function printFullType(n: number): string {
     }
   }
 }
+
+
+function printJsonType(typeId: number): any {
+  const node = typeNodes[typeId];
+  if (!node) return { kind: "unknown", id: typeId };
+
+  const result: any = { kind: node.kind };
+
+  switch (node.kind) {
+    case "primitive":
+      result.name = node.name;
+      break;
+
+    case "union":
+      result.types = node.types.map((tid: number) =>
+        printJsonType(tid)
+      );
+      break;
+
+    case "array":
+      result.elementType = printJsonType(node.elementType);
+      break;
+
+    case "object":
+      result.name = node.name;
+      break;
+
+    case "enum":
+      result.name = node.name;
+      break;
+
+    case "function":
+      result.name = node.name;
+      result.params = (node.params || []).map((p: any) => ({
+        name: p.name,
+        type: printJsonType(p.type),
+      }));
+      result.returnType = printJsonType(node.returnType);
+      break;
+
+    default:
+      result.raw = node;
+  }
+
+  return result;
+}
+
+
 
 // 序列化 TypeNode 为字符串, 确保唯一性
 function serializeTypeNode(t: TypeNode): string {
@@ -409,7 +458,7 @@ function firstPass(filePath: string, ast: AstNode) {
     let realPath = path.basename(filePath).replace(/\^/g, "\\").replace(/\.ast\.json/g, "");
 
     // export Class Enum TypeAlias Interface
-    if ((node.kind === "ClassDeclaration" || node.kind === "InterfaceDeclaration" || node.kind === "EnumDeclaration" || node.kind === "TypeAliasDeclaration") && findNodesByKind(node, "ExportKeyword").length > 0) {
+    if ((node.kind === "ClassDeclaration" || node.kind === "InterfaceDeclaration" || node.kind === "EnumDeclaration" || node.kind === "TypeAliasDeclaration" || node.kind === "FunctionDeclaration") && findNodesByKind(node, "ExportKeyword").length > 0) {
       const idNode = node.children?.find(n => n.kind === "Identifier");
       if (idNode && idNode.text) {
         globalExportMap[realPath] ??= {};
@@ -901,8 +950,6 @@ function secondPass(filePath: string, node: AstNode) {
     },
     // 处理import声明
     ImportDeclaration(node) {
-      const imported: AstNode[] = findNodesByKind(node, "Identifier");
-
       const raw = node.children?.find(n => n.kind === "StringLiteral")?.text;
       const moduleSpecifier = raw?.replace(/^['"]|['"]$/g, "");  // 去掉引号
       if (!moduleSpecifier) {
@@ -912,62 +959,71 @@ function secondPass(filePath: string, node: AstNode) {
       }
 
       const resolvedFile = resolveImportPath(filePath, moduleSpecifier);
-      for (const idNode of imported) {
-        const symbol = idNode.text!;
-        varBindings.set(symbol, idNode.varId!);
-        if (!resolvedFile) {
-          if (LOG_IMPORT)
-            console.warn(`can not resolve import ${moduleSpecifier} in ${filePath}`);
-          allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${symbol} from ${moduleSpecifier}`]);
-          continue;
-        }
+      if (!resolvedFile) {
+        if (LOG_IMPORT)
+          console.warn(`can not resolve import ${moduleSpecifier} in ${filePath}`);
+      }
 
-        const nsimpt = findNodesByKind(node, "NamespaceImport")[0];
-        if (idNode.varId === nsimpt?.children?.find(n => n.kind === "Identifier")?.varId) {
-          const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
-          typeSet[idNode.varId!] = typeId;
-          varBindings.set(idNode.text!, idNode.varId!);
+      let idNode;
+
+      // import * as x from "xxx"
+      const nsimpt = findNodesByKind(node, "NamespaceImport")[0];
+      idNode = nsimpt?.children?.find(n => n.kind === "Identifier");
+      if (idNode?.varId && idNode?.text) {
+        const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
+        typeSet[idNode.varId!] = typeId;
+        varBindings.set(idNode.text, idNode.varId);
+
+        if (!resolvedFile) {
+          allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${idNode.text} from ${moduleSpecifier}`]);
+        } else {
           for (const symb in globalExportMap[resolvedFile]) {
             allConstraints.push(["initProperty", idNode.varId!, globalExportMap[resolvedFile]?.[symb], ""])
             allConstraints.push(["takeProperty", globalExportMap[resolvedFile]?.[symb], idNode.varId!, ``]);
           }
-          continue;
+        }
+      }
+
+      // import {A as a, B} from "xxx"
+      const ndimpts = findNodesByKind(node, "ImportSpecifier");
+      for (const ndimpt of ndimpts) {
+        let target;
+        if (ndimpt.children?.length === 1) {
+          idNode = ndimpt.children[0];
+          varBindings.set(idNode.text!, idNode.varId!);
+
+          if (!resolvedFile) {
+            allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${idNode.text} from ${moduleSpecifier}`]);
+          } else {
+            target = globalExportMap[resolvedFile]?.[idNode.text!];
+          }
+        } else if(ndimpt.children?.length === 3) {
+          idNode = ndimpt.children[2];
+          varBindings.set(idNode.text!, idNode.varId!);
+
+          if (!resolvedFile) {
+            allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${idNode.text} from ${moduleSpecifier}`]);
+          } else {
+            target = globalExportMap[resolvedFile]?.[ndimpt.children[0].text!];
+          }
         }
 
-        const target = globalExportMap[resolvedFile]?.[symbol] === undefined? globalExportMap[resolvedFile]?.["default"] : globalExportMap[resolvedFile]?.[symbol];
-        if (target !== undefined) {
-          allConstraints.push(["sameType", idNode.varId!, target, `Success import ${symbol} from ${moduleSpecifier}`]);
+        if (target !== undefined && idNode) {
+          allConstraints.push(["sameType", idNode.varId!, target, `Success import ${idNode.text} from ${moduleSpecifier}`]);
+        }
+      }
+
+      // import x from "xxx"
+      const impt = findNodesByKind(node, "ImportClause")[0];
+      for (const idNode of impt?.children?.filter(c => c.kind === "Identifier") || []) {
+        varBindings.set(idNode.text!, idNode.varId!);
+
+        if (!resolvedFile) {
+          allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${idNode.text} from ${moduleSpecifier}`]);
         } else {
-          // export xxx from file
-          function findfa(file: string) : number | undefined {
-            for (let dst of globalExportFa[file]?.[symbol] || []) {
-              console.log(`now in ${dst} finding ${symbol} at ${file}`);
-              if (globalExportMap[dst]?.[symbol]) {
-                globalExportMap[file] ??= {};
-                globalExportMap[file][symbol] = globalExportMap[dst][symbol];
-                return globalExportMap[dst][symbol];
-              }
-              else return findfa(dst);
-            }
-            for (let dst of globalExportFa[file]?.["*"] || []) {
-              console.log(`now in ${dst} finding ${symbol} at ${file}`);
-              if (globalExportMap[dst]?.[symbol]) {
-                globalExportMap[file] ??= {};
-                globalExportMap[file][symbol] = globalExportMap[dst][symbol];
-                return globalExportMap[dst][symbol];
-              }
-              const res = findfa(dst);
-              if (res) return res;
-            }
-            return undefined;
-          }
-          const ret = findfa(resolvedFile);
-          if (ret) {
-            allConstraints.push(["sameType", idNode.varId!, ret, `Asesome! Success import ${symbol}(*) from ${moduleSpecifier}`]);
-          } else {
-            if (LOG_IMPORT)
-              console.warn(`Symbol ${symbol} not found in export map of ${resolvedFile} in ${filePath}`);
-            allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${symbol} from ${moduleSpecifier}`]);
+          const target = globalExportMap[resolvedFile]?.[idNode.text!] === undefined? globalExportMap[resolvedFile]?.["default"] : globalExportMap[resolvedFile]?.[idNode.text!];
+          if (target !== undefined) {
+            allConstraints.push(["sameType", idNode.varId!, target, `Success import ${idNode.text} from ${moduleSpecifier}`]);
           }
         }
       }
@@ -1243,7 +1299,7 @@ function secondPass(filePath: string, node: AstNode) {
           }
         }
         // 处理加减乘除模运算
-        else if (left.varId !== undefined && right.varId !== undefined && operator.kind === "PlusToken" || operator.kind === "MinusToken" || operator.kind === "AsteriskToken" || operator.kind === "SlashToken" || operator.kind === "PercentToken") {
+        else if (left.varId !== undefined && right.varId !== undefined && operator.kind === "PlusToken" || operator.kind === "MinusToken" || operator.kind === "AsteriskToken" || operator.kind === "SlashToken" || operator.kind === "PercentToken" || operator.kind === "AsteriskAsteriskToken") {
           allConstraints.push(["sameType", left.varId!, right.varId!, `${left.text!} == ${right.text!}`]);
           allConstraints.push(["sameType", node.varId!, right.varId!, `${node.text!} = ${right.text!}`]);
           allConstraints.push(["sameType", node.varId!, left.varId!, `${node.text!} == ${left.text!}`]);
@@ -1959,6 +2015,20 @@ function evaluate() {
 // 输出图和约束
 function emitGlobalTypeGraphAndConstraints() {
   const types = deriveVariableTypes();
+
+  // 需要输出全部标注时
+  if (!MERGE_IDENTIFIERS) {
+    for (const [kind, a, b] of allConstraints) {
+      if (kind === "sameID") {
+        // 合并标识符类型
+        typeSet[a] = typeSet[b];
+        graph[b] ??= {};
+        graph[b][a] = "sameID";
+      }
+    }
+  }
+
+
   evaluate();
 
   const outDir = path.join(outputDir, "typegraph");
@@ -1996,6 +2066,7 @@ function emitGlobalTypeGraphAndConstraints() {
           typeid: typeSet[srcId] ?? UNKNOWN,
           type: printType(typeSet[srcId] ?? UNKNOWN),
           fullType: printFullType(typeSet[srcId] ?? UNKNOWN),
+          jsonType: printJsonType(typeSet[srcId] ?? UNKNOWN),
           text: srcVar?.text,
           file: srcfile,
           position: srcVar?.position,
@@ -2014,6 +2085,7 @@ function emitGlobalTypeGraphAndConstraints() {
             typeid: typeSet[dstId] ?? UNKNOWN,
             type: printType(typeSet[dstId] ?? UNKNOWN),
             fullType: printFullType(typeSet[dstId] ?? UNKNOWN),
+            jsonType: printJsonType(typeSet[srcId] ?? UNKNOWN),
             text: dstVar?.text,
             file: dstfile,
             position: dstVar?.position,
