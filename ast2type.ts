@@ -20,7 +20,6 @@ const LOG_TYPENODE_VERBOSE = false; // 是否开启类型节点详细日志
 const LOG_IDENTIFIER_NODE = false; // 是否开启标识符节点日志
 const LOG_IMPORT = true; // 是否开启导入日志
 const LOG_TYPE_FLOW = false; // 是否开启类型流日志
-const MERGE_IDENTIFIERS = false; // 是否合并标识符
 
 // 常量类型
 const NUMBER = 1;
@@ -1856,6 +1855,13 @@ function deriveVariableTypes() {
     }
   }
 
+  // 传递sameID类型
+  for (const [kind, a, b] of allConstraints) {
+    if (kind === "sameID") {
+      typeSet[a] = typeSet[b];
+    }
+  }
+
   const result: Record<string, string> = {};
   for (const [name, id] of globalVarBindings.entries()) {
     result[name] = printType(typeSet[id] ?? UNKNOWN);
@@ -1995,20 +2001,6 @@ function evaluate() {
 // 输出图和约束
 function emitGlobalTypeGraphAndConstraints() {
   const types = deriveVariableTypes();
-
-  // 需要输出全部标注时
-  if (!MERGE_IDENTIFIERS) {
-    for (const [kind, a, b] of allConstraints) {
-      if (kind === "sameID") {
-        // 合并标识符类型
-        typeSet[a] = typeSet[b];
-        graph[b] ??= {};
-        graph[b][a] = "sameID";
-      }
-    }
-  }
-
-
   evaluate();
 
   const outDir = path.join(outputDir, "typegraph");
