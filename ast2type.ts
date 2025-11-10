@@ -423,6 +423,12 @@ function makePurePropertiesCopy(
 function firstPass(filePath: string, ast: AstNode) {
   function walk(node: AstNode) {
     node.varId = getTypeVarId(node);
+    // 提前函数声明
+    node.children?.sort((a, b) => {
+      const aFunc = a.kind === "FunctionDeclaration";
+      const bFunc = b.kind === "FunctionDeclaration";
+      return (aFunc === bFunc) ? 0 : aFunc ? -1 : 1;
+    });
     for (const child of node.children || []) {
       child.parent = node;
       walk(child);
@@ -2023,7 +2029,7 @@ function emitGlobalTypeGraphAndConstraints() {
 
   // 写出类型标注结果
   const json = generateTypeAnno();
-  const outfile = path.join(outDir, "typeinfo.json");
+  const outfile = path.join(outputDir, "typeinfo.json");
   fs.writeFileSync(outfile, JSON.stringify(json, null, 2), "utf8");
 
   console.log(`Done. Output written to ${outDir}`);
@@ -2086,6 +2092,7 @@ function emitGlobalTypeGraphAndConstraints() {
       const id = Number(idstr)
       const node = syntaxNodes[id];
       const t = printJsonType(typeSet[id] ?? UNKNOWN);
+      if (t === "unknown") continue;
       outJson.push({
         exprText: node.text,
         exprKind: node.kind,
