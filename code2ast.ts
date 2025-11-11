@@ -3,8 +3,6 @@ import * as path from "path";
 import { Project, SyntaxKind, Node, SourceFile } from "ts-morph";
 import { Command } from "commander";
 import JSON5 from "json5";
-import { mainModule } from "process";
-import { resolve } from "path/win32";
 
 const program = new Command();
 program

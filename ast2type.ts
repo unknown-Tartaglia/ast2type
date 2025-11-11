@@ -1,7 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
 import { Command } from "commander";
-import { ExportDeclaration, ts, UnionTypeNode } from "ts-morph";
 
 // 命令行参数解析
 const program = new Command();
