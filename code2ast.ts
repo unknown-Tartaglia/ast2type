@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { Project, SyntaxKind, Node, SourceFile } from "ts-morph";
+import { Project, SyntaxKind, Node } from "ts-morph";
 import { Command } from "commander";
 import JSON5 from "json5";
 
@@ -193,12 +193,13 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
   if (children.length > 0) serialized.children = children;
 
   const sourceFile = node.getSourceFile();
-  const startPos = sourceFile.getLineAndColumnAtPos(node.getPos());
+  const startPos = sourceFile.getLineAndColumnAtPos(node.getStart());
   const endPos = sourceFile.getLineAndColumnAtPos(node.getEnd());
   serialized.position = {
     start: { line: startPos.line, character: startPos.column },
     end: { line: endPos.line, character: endPos.column },
   };
+  serialized.offset = node.getStart();
 
   return serialized;
 }

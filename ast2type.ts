@@ -59,6 +59,7 @@ interface AstNode {
   children?: AstNode[];
   varId?: number;
   position?: { start: { line: number; character: number }; end: { line: number; character: number } };
+  offset?: number;
 }
 
 // 全局结构
@@ -67,7 +68,7 @@ const cnt: Record<number, number> = {};
 const fileToAst: Record<string, AstNode> = {};
 const globalExportMap: Record<string, Record<string, number>> = {};
 const globalExportFa: Record<string, Record<string, string[]>> = {};
-const syntaxNodes: Record<number, { kind: string; text?: string; file?: string; position?: any }> = {};
+const syntaxNodes: Record<number, { kind: string; text?: string; file?: string; position?: any; offset?: number }> = {};
 const typeNodes: Record<number, TypeNode> = {};
 const allConstraints: Array<[string, number, number, string]> = [];
 const globalVarBindings = new Map<string, number>();
@@ -193,7 +194,7 @@ function printJsonType(typeId: number): any {
     case "union":
       return Array.from(new Set(node.types.map(t => printJsonType(t))));
     case "array":
-      return `${node.elementType}[]`;
+      return `array`;
     case "object":
       return "object";
     case "enum":
@@ -1248,6 +1249,7 @@ function secondPass(filePath: string, node: AstNode) {
       if (node.children && node.children.length >= 2) {
         const operator = node.children[0];
         const exprNode = node.children[1];
+        syntaxNodes[node.varId!].offset = operator.offset;
         if (exprNode.varId !== undefined) {
           if (operator.kind === "ExclamationToken") {
             allConstraints.push(["hasType", node.varId!, BOOLEAN, `!${exprNode.text!} ∈ boolean`]);
@@ -1266,6 +1268,7 @@ function secondPass(filePath: string, node: AstNode) {
         const left = node.children[0];
         const operator = node.children[1];
         const right = node.children[2];
+        syntaxNodes[node.varId!].offset = operator.offset;
         // 处理赋值操作
         if (left.varId !== undefined && right.varId !== undefined && operator.kind === "FirstAssignment") {
           allConstraints.push(["sameType", left.varId, right.varId, `${left.text!} = ${right.text!}`]);
@@ -1302,6 +1305,7 @@ function secondPass(filePath: string, node: AstNode) {
       if (node.children && node.children.length >= 3) {
         const left = node.children[0];
         const right = node.children[2];
+        syntaxNodes[node.varId!].offset = node.children[1].offset;
         if (left.varId !== undefined && node.varId !== undefined) {
           allConstraints.push(["arrayElement", node.varId, left.varId, `${left.text!}[${right.text!}]`]);
         }
@@ -1313,6 +1317,7 @@ function secondPass(filePath: string, node: AstNode) {
         const left = node.children[0];
         const operator = node.children[1];
         const right = node.children[2];
+        syntaxNodes[node.varId!].offset = operator.offset;
         // 处理dot运算符
         if ((operator.kind === "DotToken" || operator.kind === "QuestionDotToken") && left.varId !== undefined && right.varId !== undefined) {
           // 处理属性访问
@@ -1412,6 +1417,7 @@ function secondPass(filePath: string, node: AstNode) {
         // 不能改为在bindings中查找，因为有可能是匿名函数调用
         const funcNode = node.children[0];
         if (funcNode.varId !== undefined && node.varId !== undefined) {
+          syntaxNodes[node.varId!].offset = funcNode.kind === "Identifier" ? funcNode.offset : node.children[1].offset;
           allConstraints.push(["funcCall", node.varId, funcNode.varId, `${node.text}`]);
 
           // 处理实参
@@ -1532,7 +1538,7 @@ function secondPass(filePath: string, node: AstNode) {
   function walk(node: AstNode) {
     const id = node.varId;
     if (id === undefined) throw new Error("Missing varId in second pass");
-    syntaxNodes[id] = { kind: node.kind, text: node.text, file: filePath, position: node.position };
+    syntaxNodes[id] = { kind: node.kind, text: node.text, file: filePath, position: node.position, offset: node.offset };
 
     // 处理先序遍历
     let handler = preOrderHandlers[node.kind];
@@ -2087,7 +2093,7 @@ function emitGlobalTypeGraphAndConstraints() {
       outJson.push({
         exprText: node.text,
         exprKind: node.kind,
-        location: node.position,
+        location: node.offset,
         type: typeof(t) === "string" ? t : t.length === 1 ? t[0] : undefined,
         unionTypes: typeof(t) !== "string" && t.length > 1 ? t : undefined,
       })
@@ -2100,7 +2106,7 @@ function emitGlobalTypeGraphAndConstraints() {
 // 主流程
 function main() {
   // 创建一个虚拟节点，表示未知的导入
-  syntaxNodes[0] = { kind: "null", text: "unknown import hole", file: "null", position: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } };
+  syntaxNodes[0] = { kind: "null", text: "unknown import hole", file: "null", position: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, offset: -1 };
   // 手动初始化内置类型节点
   typeNodes[NUMBER] = { kind: "primitive", name: "number" };
   typeNodes[STRING] = { kind: "primitive", name: "string" };
