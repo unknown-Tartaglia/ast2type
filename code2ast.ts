@@ -236,6 +236,8 @@ function dumpFile(filePath: string | null, isSDK = false, kitImports : string[] 
 }
 
 function collectSourceFiles(dir: string): string[] {
+  // 如果dir不是目录
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [dir];
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   let files: string[] = [];
   for (const entry of entries) {
