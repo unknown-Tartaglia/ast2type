@@ -77,7 +77,7 @@ const graph: Record<number, Record<number, string>> = {};
 const source: Record<number, Record<number, number>> = {};
 const typeSet: Record<number, number> = {};
 const parent: Record<number, number> = {};
-const globalImportMap : Map<string, string> = new Map(JSON.parse(fs.readFileSync(path.join(inputDir, "importMap.json"), "utf8")));
+const globalImportMap: Map<string, string> = new Map((() => { try { return JSON.parse(fs.readFileSync(path.join(inputDir, "importMap.json"), "utf8")); } catch { return []; } })());
 let worklist: number[] = [];
 const funcParam: Record<number, number[]> = {};
 const constructors: Record<number, number> = {};
