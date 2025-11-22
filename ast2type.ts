@@ -1,7 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
 import { Command } from "commander";
-import { connect } from "http2";
 
 // 命令行参数解析
 const program = new Command();
@@ -1325,7 +1324,7 @@ function secondPass(filePath: string, node: AstNode) {
         if (left.varId !== undefined && right.varId !== undefined && operator.kind === "FirstAssignment") {
           allConstraints.push(["sameType", left.varId, right.varId, `${left.text!} = ${right.text!}`]);
           allConstraints.push(["sameType", node.varId!, right.varId, `${node.text!} = ${right.text!}`]);
-          allConstraints.push(["sameType", right.varId!, left.varId, `${left.text!} = ${right.text!}`]);
+          // allConstraints.push(["sameType", right.varId!, left.varId, `${left.text!} = ${right.text!}`]);
           // 处理对象属性设置
           if (left.kind === "PropertyAccessExpression" && left.children && left.children.length! >= 3) {
             allConstraints.push(["setProperty", left.children[0].varId!, left.varId, `${left.children[0].text}.${left.children[2].text} = ${right.text}`]);
@@ -1333,7 +1332,7 @@ function secondPass(filePath: string, node: AstNode) {
         }
         // 处理加减乘除模运算
         else if (left.varId !== undefined && right.varId !== undefined && operator.kind === "PlusToken" || operator.kind === "MinusToken" || operator.kind === "AsteriskToken" || operator.kind === "SlashToken" || operator.kind === "PercentToken" || operator.kind === "AsteriskAsteriskToken") {
-          allConstraints.push(["sameType", left.varId!, right.varId!, `${left.text!} == ${right.text!}`]);
+          // allConstraints.push(["sameType", left.varId!, right.varId!, `${left.text!} == ${right.text!}`]);
           allConstraints.push(["sameType", node.varId!, right.varId!, `${node.text!} = ${right.text!}`]);
           allConstraints.push(["sameType", node.varId!, left.varId!, `${node.text!} == ${left.text!}`]);
         }
