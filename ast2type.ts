@@ -82,6 +82,12 @@ const globalImportMap: Map<string, string> = new Map((() => { try { return JSON.
 let worklist: number[] = [];
 const funcParam: Record<number, number[]> = {};
 const constructors: Record<number, number> = {};
+const tsMorphNodes = ["BigIntLiteral", "NumericLiteral", "FirstLiteralToken", "NullKeyword", "TrueKeyword", "FalseKeyword", "ObjectLiteralExpression",
+  "ArrayLiteralExpression", "BinaryExpression", "PrefixUnaryExpression", "PostfixUnaryExpression", "TypeOfExpression", "RegularExpressionLiteral",
+  "VoidExpression", "Identifier", "ThisKeyword", "ConditionalExpression", "PropertyAccessExpression", "ElementAccessExpression", "CallExpression",
+  "ArrowFunction", "FunctionExpression", "ReturnStatement", "ParenthesizedExpression", "TemplateExpression", "NewExpression"];
+const v8Nodes = ["Literal", "ObjectLiteral", "ArrayLiteral", "BinaryOperation", "UnaryOperation", "CountOperation", "RegExpLiteral", "VariableProxy", 
+  "Conditional", "Property", "Call", "FunctionLiteral", "ReturnStatement", "TemplateLiteral", "CallNew"];
 
 function getTypeVarId(node: AstNode): number {
   if (node.varId !== undefined) return node.varId;
@@ -1185,7 +1191,8 @@ function secondPass(filePath: string, node: AstNode) {
     },
     ThisKeyword(node) {
       if (node.varId === undefined) return;
-      syntaxNodes[node.varId!].v8kind = "ThisExpression";
+      // syntaxNodes[node.varId!].v8kind = "ThisExpression";
+
       // this关键字通常在类方法中使用
       // let classNode = node.parent;
       // while(classNode && classNode.kind !== "ClassDeclaration") classNode = classNode.parent;
@@ -1334,6 +1341,7 @@ function secondPass(filePath: string, node: AstNode) {
           // allConstraints.push(["sameType", right.varId!, left.varId, `${left.text!} = ${right.text!}`]);
           // 处理对象属性设置
           if (left.kind === "PropertyAccessExpression" && left.children && left.children.length! >= 3) {
+            syntaxNodes[node.varId!].v8kind = undefined;
             allConstraints.push(["setProperty", left.children[0].varId!, left.varId, `${left.children[0].text}.${left.children[2].text} = ${right.text}`]);
           }
         }
@@ -1378,12 +1386,24 @@ function secondPass(filePath: string, node: AstNode) {
         const operator = node.children[1];
         const right = node.children[2];
         syntaxNodes[node.varId!].offset = right.offset;
+        syntaxNodes[right.varId!].v8kind = undefined;
         // 处理dot运算符
         if ((operator.kind === "DotToken" || operator.kind === "QuestionDotToken") && left.varId !== undefined && right.varId !== undefined) {
           // 处理属性访问
           const propName = right.text;
           if (propName) {
             allConstraints.push(["takeProperty", node.varId!, left.varId!, `${left.text!}.${propName}`]);
+          }
+        }
+      }
+    },
+    PropertyAssignment(node) {
+      if (node.children) {
+        const index = node.children?.findIndex(n => n.kind === "ColonToken");
+        if (index !== undefined && index !== -1) {
+          const right = node.children?.[index + 1];
+          if (right && right.varId) {
+            syntaxNodes[right.varId].v8kind = undefined;
           }
         }
       }
@@ -1436,7 +1456,7 @@ function secondPass(filePath: string, node: AstNode) {
     },
     // 处理标识符
     Identifier(node) {
-      syntaxNodes[node.varId!].v8kind = "VariableProxy";
+      if (tsMorphNodes.includes(node.parent?.kind!)) syntaxNodes[node.varId!].v8kind = "VariableProxy";
       if (node.text) {
         let typeId = paramBindings.get(node.text);
 
@@ -1501,6 +1521,7 @@ function secondPass(filePath: string, node: AstNode) {
         const funcNode = node.children[0];
         if (funcNode.varId !== undefined && node.varId !== undefined) {
           syntaxNodes[node.varId!].offset = funcNode.kind === "Identifier" ? funcNode.offset : node.children[1].offset;
+          syntaxNodes[funcNode.varId!].v8kind = funcNode.kind === "Identifier" ? undefined : syntaxNodes[funcNode.varId!].v8kind;
           allConstraints.push(["funcCall", node.varId, funcNode.varId, `${node.text}`]);
 
           // 处理实参
@@ -2187,12 +2208,13 @@ function emitGlobalTypeGraphAndConstraints() {
       const id = Number(idstr)
       const node = syntaxNodes[id];
       const t = printJsonType(typeSet[id] ?? UNKNOWN);
-      if (t === "unknown" || node.kind === "ParenthesizedExpression" || node.kind === "VoidKeyword") continue;
+      if (t === "unknown" || !node.v8kind) continue;
       outJson.push({
         exprText: node.text,
         exprKind: node.v8kind,
         morphKind: node.v8kind ? undefined : node.kind,
         location: node.offset,
+        pos: node.position,
         type: typeof(t) === "string" ? t : t.length === 1 ? t[0] : undefined,
         unionTypes: typeof(t) !== "string" && t.length > 1 ? t : undefined,
         file: node.file!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, ""),
