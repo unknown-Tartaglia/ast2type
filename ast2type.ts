@@ -20,6 +20,8 @@ const LOG_IDENTIFIER_NODE = false; // 是否开启标识符节点日志
 const LOG_IMPORT = true; // 是否开启导入日志
 const LOG_TYPE_FLOW = false; // 是否开启类型流日志
 
+const DEDUCE_ONLY_WHEN_ALL_KNOWNN = true; // 仅在所有分支类型已知时进行类型推断
+
 // 常量类型
 const NUMBER = 1;
 const STRING = 2;
@@ -386,12 +388,17 @@ function mergeBranches(node : number, kinds? : string[]) : number {
 
     
     const seen = new Map<string, number>();
+    let has_unknown = false;
     for (const ty of tyList) {
-      if (ty === UNKNOWN) continue;
+      if (ty === UNKNOWN) {
+        has_unknown = true;
+        continue;
+      }
       const sig = printType(ty);
       const old = seen.get(sig);
       if (old === undefined || old < ty) seen.set(sig, ty);
     }
+    if (DEDUCE_ONLY_WHEN_ALL_KNOWNN && has_unknown) return UNKNOWN;
     tyList = [...seen.values()];    
 
 
