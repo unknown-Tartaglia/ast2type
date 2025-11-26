@@ -70,7 +70,7 @@ const cnt: Record<number, number> = {};
 const fileToAst: Record<string, AstNode> = {};
 const globalExportMap: Record<string, Record<string, number>> = {};
 const globalExportFa: Record<string, Record<string, string[]>> = {};
-const syntaxNodes: Record<number, { kind: string; text?: string; file?: string; position?: any; offset?: number; v8kind?:string }> = {};
+const syntaxNodes: Record<number, { kind: string; text?: string; file?: string; position?: any; offset?: number; v8kind?:string; context?:string }> = {};
 const typeNodes: Record<number, TypeNode> = {};
 const allConstraints: Array<[string, number, number, string]> = [];
 const globalVarBindings = new Map<string, number>();
@@ -663,6 +663,8 @@ function secondPass(filePath: string, node: AstNode) {
       // 处理赋值操作
       if (firstAssignmentIndex && firstAssignmentIndex !== -1) {
         const right = node.children?.[firstAssignmentIndex + 1];
+        syntaxNodes[node.varId!].v8kind = "Assignment";
+        syntaxNodes[node.varId!].offset = right?.offset;
         if (left.varId !== undefined && right?.varId !== undefined) {
           allConstraints.push(["sameType", left.varId, right.varId, `${left.text!} = ${right.text!}`]);
         }
@@ -1328,14 +1330,15 @@ function secondPass(filePath: string, node: AstNode) {
     },
     // 二元操作
     BinaryExpression(node) {
-      syntaxNodes[node.varId!].v8kind = "BinaryOperation"
       if (node.children && node.children.length >= 3) {
         const left = node.children[0];
         const operator = node.children[1];
         const right = node.children[2];
         syntaxNodes[node.varId!].offset = operator.offset;
         // 处理赋值操作
-        if (left.varId !== undefined && right.varId !== undefined && operator.kind === "FirstAssignment") {
+        if (left.varId !== undefined && right.varId !== undefined && (operator.kind === "FirstAssignment" || operator.kind === "FirstCompoundAssignment" || operator.kind === "MinusEqualsToken" || operator.kind === "AsteriskEqualsToken" || operator.kind === "SlashEqualsToken" || operator.kind === "PercentEqualsToken" || operator.kind === "AsteriskAsteriskEqualsToken" || operator.kind === "AmpersandEqualsToken" || operator.kind === "BarEqualsToken")) {
+          syntaxNodes[node.varId!].v8kind = operator.kind === "FirstAssignment" ? "Assignment" : "CompoundAssignment";
+          syntaxNodes[left.varId!].v8kind = undefined;
           allConstraints.push(["sameType", left.varId, right.varId, `${left.text!} = ${right.text!}`]);
           allConstraints.push(["sameType", node.varId!, right.varId, `${node.text!} = ${right.text!}`]);
           // allConstraints.push(["sameType", right.varId!, left.varId, `${left.text!} = ${right.text!}`]);
@@ -1346,19 +1349,22 @@ function secondPass(filePath: string, node: AstNode) {
           }
         }
         // 处理加减乘除模运算
-        else if (left.varId !== undefined && right.varId !== undefined && operator.kind === "PlusToken" || operator.kind === "MinusToken" || operator.kind === "AsteriskToken" || operator.kind === "SlashToken" || operator.kind === "PercentToken" || operator.kind === "AsteriskAsteriskToken") {
+        else if (left.varId !== undefined && right.varId !== undefined && (operator.kind === "PlusToken" || operator.kind === "MinusToken" || operator.kind === "AsteriskToken" || operator.kind === "SlashToken" || operator.kind === "PercentToken" || operator.kind === "AsteriskAsteriskToken")) {
           // allConstraints.push(["sameType", left.varId!, right.varId!, `${left.text!} == ${right.text!}`]);
+          syntaxNodes[node.varId!].v8kind = "BinaryOperation";
           allConstraints.push(["sameType", node.varId!, right.varId!, `${node.text!} = ${right.text!}`]);
           allConstraints.push(["sameType", node.varId!, left.varId!, `${node.text!} == ${left.text!}`]);
         }
         // 处理逻辑运算
         else if (left.varId !== undefined && right.varId !== undefined && (operator.kind === "AmpersandAmpersandToken" || operator.kind === "BarBarToken")) {
+          syntaxNodes[node.varId!].v8kind = "BinaryOperation";
           allConstraints.push(["sameType", node.varId!, left.varId!, `${node.text!} = ${left.text!}`]);
           allConstraints.push(["sameType", node.varId!, right.varId!, `${node.text!} = ${right.text!}`]);
         }
         // 处理比较运算
         else if (left.varId !== undefined && right.varId !== undefined && (operator.kind === "LessThanToken" || operator.kind === "GreaterThanToken" || operator.kind === "LessThanEqualsToken" || operator.kind === "GreaterThanEqualsToken" || operator.kind === "EqualsEqualsToken" || operator.kind === "ExclamationEqualsToken" || operator.kind === "EqualsEqualsEqualsToken" || operator.kind === "ExclamationEqualsEqualsToken")) {
           allConstraints.push(["hasType", node.varId!, BOOLEAN, `${node.text!} ∈ boolean`]);
+          syntaxNodes[node.varId!].v8kind = "CompareOperation";
           // 认为是同一类型
           // allConstraints.push(["sameType", left.varId, right.varId, `${left.text!} ${operator.text} ${right.text}`]);
           // allConstraints.push(["sameType", right.varId, left.varId, `${left.text!} ${operator.text} ${right.text}`]);
@@ -1403,7 +1409,7 @@ function secondPass(filePath: string, node: AstNode) {
         if (index !== undefined && index !== -1) {
           const right = node.children?.[index + 1];
           if (right && right.varId) {
-            syntaxNodes[right.varId].v8kind = undefined;
+            // syntaxNodes[right.varId].v8kind = undefined;
           }
         }
       }
@@ -1496,7 +1502,7 @@ function secondPass(filePath: string, node: AstNode) {
     },
     // 处理返回值
     ReturnStatement(node) {
-      syntaxNodes[node.varId!].v8kind = "ReturnStatement";
+      // syntaxNodes[node.varId!].v8kind = "ReturnStatement";
       if (node.children && node.children.length >= 2) {
         const exprNode = node.children[1];
 
@@ -1520,8 +1526,7 @@ function secondPass(filePath: string, node: AstNode) {
         // 不能改为在bindings中查找，因为有可能是匿名函数调用
         const funcNode = node.children[0];
         if (funcNode.varId !== undefined && node.varId !== undefined) {
-          syntaxNodes[node.varId!].offset = funcNode.kind === "Identifier" ? funcNode.offset : node.children[1].offset;
-          syntaxNodes[funcNode.varId!].v8kind = funcNode.kind === "Identifier" ? undefined : syntaxNodes[funcNode.varId!].v8kind;
+          syntaxNodes[node.varId!].offset = funcNode.kind === "PropertyAccessExpression" ? funcNode.children?.[2].offset : funcNode.offset;
           allConstraints.push(["funcCall", node.varId, funcNode.varId, `${node.text}`]);
 
           // 处理实参
@@ -1643,8 +1648,8 @@ function secondPass(filePath: string, node: AstNode) {
   function walk(node: AstNode) {
     const id = node.varId;
     if (id === undefined) throw new Error("Missing varId in second pass");
-    syntaxNodes[id] = { kind: node.kind, text: node.text, file: filePath, position: node.position, offset: node.offset };
-
+    syntaxNodes[id] = { kind: node.kind, text: node.text, file: filePath, position: node.position, offset: node.offset, context: node.parent?.text 
+};
     // 处理先序遍历
     let handler = preOrderHandlers[node.kind];
     if (handler) handler(node);
@@ -2137,9 +2142,9 @@ function emitGlobalTypeGraphAndConstraints() {
   // 按 file 分组
   const groups : Record<string, any> = {};
   for (const item of json) {
-    if (!groups[item.file]) groups[item.file] = [];
-    const { file, ...rest } = item;  // 去掉 file 字段
-    groups[item.file].push(rest);
+    if (!groups[item.relapath]) groups[item.relapath] = [];
+    const { file, relapath, ...rest } = item;  // 去掉 file 字段
+    groups[item.relapath].push(rest);
   }
 
   for (const file in groups) {
@@ -2210,14 +2215,16 @@ function emitGlobalTypeGraphAndConstraints() {
       const t = printJsonType(typeSet[id] ?? UNKNOWN);
       if (t === "unknown" || !node.v8kind) continue;
       outJson.push({
+        context: node.context,
         exprText: node.text,
         exprKind: node.v8kind,
-        morphKind: node.v8kind ? undefined : node.kind,
+        morphKind: node.kind,
         location: node.offset,
         pos: node.position,
         type: typeof(t) === "string" ? t : t.length === 1 ? t[0] : undefined,
         unionTypes: typeof(t) !== "string" && t.length > 1 ? t : undefined,
-        file: node.file!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, ""),
+        relapath: node.file!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, ""),
+        file: path.join(node.file!.split("ast" + require("path").sep)[0].replace("_output", ""), node.file!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")),
       })
     }
     return outJson;

@@ -26,6 +26,7 @@
     "typescript-eslint": "^8.46.2"
   },
   "dependencies": {
+    "@anthropic-ai/claude-code": "^2.0.50",
     "commander": "^13.1.0",
     "cors": "^2.8.5",
     "express": "^5.1.0",
