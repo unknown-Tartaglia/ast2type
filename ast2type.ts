@@ -20,7 +20,7 @@ const LOG_IDENTIFIER_NODE = false; // 是否开启标识符节点日志
 const LOG_IMPORT = true; // 是否开启导入日志
 const LOG_TYPE_FLOW = false; // 是否开启类型流日志
 
-const DEDUCE_ONLY_WHEN_ALL_KNOWNN = true; // 仅在所有分支类型已知时进行类型推断
+const DEDUCE_ONLY_WHEN_ALL_KNOWNN = false; // 仅在所有分支类型已知时进行类型推断
 
 // 常量类型
 const NUMBER = 1;
@@ -637,6 +637,31 @@ function secondPass(filePath: string, node: AstNode) {
         }
       }
     },
+    FunctionExpression(node) {
+      syntaxNodes[node.varId!].v8kind = "FunctionLiteral";
+      if (node.children) {
+        const idNode = node;
+        const index = node.children?.findIndex(n => n.kind === "ColonToken");
+        // 类型注解
+        if (index !== undefined && index !== -1) {
+          const typeNode = node.children?.[index + 1];
+          if (typeNode && typeNode.varId) {
+            const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: UNKNOWN });
+            typeSet[idNode?.varId!] = id;
+            allConstraints.push(["returnAnnotation", idNode?.varId!, typeNode.varId, `return type of function ${idNode?.text!}`]);
+          }
+        }
+        else if (findNodesByKind(node, "ReturnStatement").length === 0) {
+          // 如果没有返回类型注解并且没有Return语句
+          const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: idNode?.varId!, params: [], returnType: VOID });
+          typeSet[idNode?.varId!] = id;
+        }
+        else {
+          const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: idNode?.varId!, params: [], returnType: UNKNOWN });
+          typeSet[idNode?.varId!] = id;
+        }
+      }
+    },
     // 变量声明
     VariableDeclaration(node) {
       // example: id [: type] [= x]
@@ -715,8 +740,8 @@ function secondPass(filePath: string, node: AstNode) {
         }
 
         let funcIdNode = node.parent;
-        while (funcIdNode && funcIdNode.kind !== "FunctionDeclaration" && funcIdNode.kind !== "MethodDeclaration" && funcIdNode.kind !== "ArrowFunction" && funcIdNode.kind !== "Constructor") funcIdNode = funcIdNode.parent;
-        funcIdNode = funcIdNode?.kind === "ArrowFunction" ? funcIdNode : funcIdNode?.children?.find(n => n.kind === "Identifier" || n.kind === "ConstructorKeyword");
+        while (funcIdNode && funcIdNode.kind !== "FunctionDeclaration" && funcIdNode.kind !== "MethodDeclaration" && funcIdNode.kind !== "ArrowFunction" && funcIdNode.kind !== "Constructor" && funcIdNode.kind !== "FunctionExpression") funcIdNode = funcIdNode.parent;
+        funcIdNode = funcIdNode?.kind === "ArrowFunction" || funcIdNode?.kind === "FunctionExpression" ? funcIdNode : funcIdNode?.children?.find(n => n.kind === "Identifier" || n.kind === "ConstructorKeyword");
         if (!funcIdNode || !funcIdNode.varId) return;
 
         allConstraints.push(["setParamType", funcIdNode.varId!, paramIdNode.varId!, `parameter ${paramIdNode.text!} in function ${funcIdNode.text!}`]);
@@ -1149,9 +1174,6 @@ function secondPass(filePath: string, node: AstNode) {
     ArrayLiteralExpression(node) {
       syntaxNodes[node.varId!].v8kind = "ArrayLiteral"
     },
-    FunctionExpression(node) {
-      syntaxNodes[node.varId!].v8kind = "FunctionLiteral";
-    },
     TemplateExpression(node) {
       allConstraints.push(["hasType", node.varId!, STRING, `${node.text!} ∈ string`]);
       syntaxNodes[node.varId!].v8kind = "TemplateLiteral";
@@ -1346,6 +1368,9 @@ function secondPass(filePath: string, node: AstNode) {
           if (left.kind === "PropertyAccessExpression" && left.children && left.children.length! >= 3) {
             syntaxNodes[node.varId!].v8kind = undefined;
             allConstraints.push(["setProperty", left.children[0].varId!, left.varId, `${left.children[0].text}.${left.children[2].text} = ${right.text}`]);
+          } else if (left.kind === "ElementAccessExpression" && left.children && left.children.length! >= 4) {
+            syntaxNodes[node.varId!].v8kind = undefined;
+            allConstraints.push(["makeArray", left.children[0].varId!, right.varId, `${left.children[0].text}[${left.children[2].text}] = ${right.text}`]);
           }
         }
         // 处理加减乘除模运算
@@ -1806,8 +1831,22 @@ function deriveVariableTypes() {
         // 取数组成员
         if (typeNodes[tSet]?.kind === "array") {
           source[next][cur] = typeNodes[tSet].elementType;
-        } if (typeNodes[tSet]?.kind === "primitive" && typeNodes[tSet].name === "string") {
+        } else if (typeNodes[tSet]?.kind === "primitive" && typeNodes[tSet].name === "string") {
           source[next][cur] = mergeTypes([STRING, UNDEFINED]);
+        } else if (typeNodes[tSet]?.kind === "union") {
+          let lst = [];
+          for (const subtype of typeNodes[tSet].types) {
+            if (typeNodes[subtype]?.kind === "array") {
+              lst.push(typeNodes[subtype].elementType);
+            } else if (typeNodes[subtype]?.kind === "primitive" && typeNodes[subtype].name === "string") {
+              lst.push(mergeTypes([STRING, UNDEFINED]));
+            }
+          }
+          if (lst.length > 0) {
+            source[next][cur] = mergeTypes(lst);
+          } else {
+            console.warn(`Unexpected arrayElement when type ${tSet} : ${printType(tSet)} has no array subtype in edge ${cur}->${next}`);
+          }
         } else {
           console.warn(`Unexpected arrayElement when type ${tSet} : ${printType(tSet)} is not array in edge ${cur}->${next}`);
         }
@@ -1903,7 +1942,7 @@ function deriveVariableTypes() {
           console.warn(`setProperty on undefined type in edge ${cur}->${next}`);
           continue;
         }
-        if (typeNodes[nSet] === undefined || typeNodes[nSet].kind !== "object") {
+        if (typeNodes[nSet] === undefined || typeNodes[nSet].kind !== "object" && (typeNodes[nSet].kind !== "union" || !typeNodes[nSet].types.find(t => typeNodes[t].kind === "object"))) {
           console.warn(`setProperty on non-object type ${printType(nSet)} in edge ${cur}->${next}`);
           continue;
         }
@@ -1913,8 +1952,13 @@ function deriveVariableTypes() {
         }
 
         const dstty = typeNodes[next]?.kind === "object" ? typeNodes[next].properties[propName] ? mergeTypes([typeNodes[next].properties[propName], tSet]) : tSet : tSet;
-        const id = newTypeNode({ kind: "object", name: typeNodes[nSet].name, id: typeNodes[nSet].id, properties: makePurePropertiesCopy(typeNodes[nSet].properties, propName, dstty)});
-        typeSet[next] = id;
+        let dstobj = typeNodes[nSet].kind === "object" ? typeNodes[nSet] : typeNodes[nSet].kind === "union" ? typeNodes[nSet].types.map(t => typeNodes[t]).find(t => t.kind === "object")! : undefined;
+        if (dstobj) {
+          const id = newTypeNode({ kind: "object", name: dstobj.name, id: dstobj.id, properties: makePurePropertiesCopy(dstobj.properties, propName, dstty)});
+          typeSet[next] = typeNodes[nSet].kind === "object" ? id : newTypeNode({ kind: "union", types: typeNodes[nSet].types.map(t => typeNodes[t].kind === "object" && typeNodes[t].id === dstobj.id ? id : t) });
+        } else {
+          console.warn(`setProperty on union type without object member ${printType(nSet)} in edge ${cur}->${next}`);
+        }
       }
       else if (graph[cur][next] === "setParamType") {
         // 如果是参数类型，添加参数类型
