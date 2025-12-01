@@ -41,6 +41,7 @@ let srcFiles : string[] = [];
 const globalImportMap = new Map<string, string>();
 const suffixes = ["", ".ts", ".js", ".mjs", ".ets", ".tsx", ".d.ts", ".d.ets", ".android.bundle"];
 const visitedFiles = new Set<string>();
+let lineStarts: number[] = [];
 
 // 查找root下对应类型节点
 function findNodesByKind(root: Node, kind: SyntaxKind): Node[] {
@@ -95,17 +96,67 @@ function findFile(root: string, targetFileName: string, allowDir: boolean): stri
   return allowDir ? fs.existsSync(path.join(root, targetFileName)) ? path.join(root, targetFileName) : null : null;
 }
 
+function buildLineMap(fileText: string): number[] {
+  const lineStarts = [0];
+  for (let i = 0; i < fileText.length; i++) {
+    const ch = fileText.charCodeAt(i);
+    if (ch === 10) { // \n
+      lineStarts.push(i + 1);
+    }
+  }
+  return lineStarts;
+}
+
+function getLineAndColumn(pos: number, lineStarts: number[]) {
+  let low = 0;
+  let high = lineStarts.length - 1;
+
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const lineStart = lineStarts[mid];
+
+    if (lineStart === pos) {
+      return { line: mid + 1, character: 1 };
+    } else if (lineStart < pos) {
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  const line = high;
+  return {
+    line: line + 1,
+    character: pos - lineStarts[line] + 1,
+  };
+}
+
 
 function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | null {
   if (ignoredKinds.has(node.getKind())) return null;
 
-  const children = node.getChildren()
-    .map(c => serializeNode(c, isSDK, kitImports))
-    .filter((c) => c !== null);
-
   const serialized: any = {
     kind: SyntaxKind[node.getKind()],
+    offset: node.getStart()
   };
+
+  const children: any[] = [];
+  node.forEachChild(child => {
+    const sc = serializeNode(child, isSDK, kitImports);
+    if (sc) children.push(sc);
+  });
+  if (children.length > 0) serialized.children = children;
+
+  const text = node.getWidth() <= 100 ? node.getText() : "";
+  if (text.length > 0 && text.length <= 100) {
+    serialized.text = text;
+  }
+
+  const start = node.getStart();
+  const end = node.getEnd();
+  const startPos = getLineAndColumn(start, lineStarts);
+  const endPos = getLineAndColumn(end, lineStarts);
+  serialized.position = { start: startPos, end: endPos };
 
   if (node.getKind() === SyntaxKind.ImportDeclaration || node.getKind() === SyntaxKind.ExportDeclaration) {
     const str = node.getChildren().find(c => c.getKind() === SyntaxKind.StringLiteral);
@@ -186,21 +237,6 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
     }
   }
 
-  const text = node.getText().trim();
-  if (text.length > 0 && text.length <= 100) {
-    serialized.text = text;
-  }
-  if (children.length > 0) serialized.children = children;
-
-  const sourceFile = node.getSourceFile();
-  const startPos = sourceFile.getLineAndColumnAtPos(node.getStart());
-  const endPos = sourceFile.getLineAndColumnAtPos(node.getEnd());
-  serialized.position = {
-    start: { line: startPos.line, character: startPos.column },
-    end: { line: endPos.line, character: endPos.column },
-  };
-  serialized.offset = node.getStart();
-
   return serialized;
 }
 
@@ -215,6 +251,7 @@ function dumpFile(filePath: string | null, isSDK = false, kitImports : string[] 
   visitedFiles.add(absPath);
   console.log(`AST dumping: ${absPath}`);
   const sourceFile = project.addSourceFileAtPath(absPath);
+  lineStarts = buildLineMap(sourceFile.getFullText());
   const astJson = serializeNode(sourceFile, isSDK, kitImports);
   let relativePath : string;
   let outputFilePath : string;
@@ -273,6 +310,8 @@ function resolveArktsSourceRoots(rootDir: string): string[] {
 }
 
 function main() {
+  // 计时
+  const start = Date.now();
   const sourceRoots = resolveArktsSourceRoots(userInputDir);
   const inputDirs = sourceRoots.length > 0 ? sourceRoots : [userInputDir];
   srcFiles = inputDirs.flatMap(collectSourceFiles);
@@ -281,6 +320,8 @@ function main() {
   for (const filePath of srcFiles) dumpFile(filePath);
   // console.log(`${[...globalImportMap.values()]}`);
   fs.writeFileSync(path.resolve(outputDir, "../importMap.json"), JSON.stringify([...globalImportMap], null, 2), "utf8");
+  const end = Date.now();
+  console.log(`AST generation completed in ${(end - start) / 1000} seconds.`);
 }
 
 main();
