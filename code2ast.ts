@@ -1,8 +1,9 @@
 import * as fs from "fs";
 import * as path from "path";
-import { Project, SyntaxKind, Node } from "ts-morph";
+import { Project, SyntaxKind, Node, OutputFile } from "ts-morph";
 import { Command } from "commander";
 import JSON5 from "json5";
+import { findNodeHandle } from "react-native";
 
 const program = new Command();
 program
@@ -42,6 +43,16 @@ const globalImportMap = new Map<string, string>();
 const suffixes = ["", ".ts", ".js", ".mjs", ".ets", ".tsx", ".d.ts", ".d.ets", ".android.bundle"];
 const visitedFiles = new Set<string>();
 let lineStarts: number[] = [];
+const position = {
+  "start": {
+    "line": -1,
+    "character": -1
+  },
+  "end": {
+    "line": -1,
+    "character": -1
+  }
+}
 
 // 查找root下对应类型节点
 function findNodesByKind(root: Node, kind: SyntaxKind): Node[] {
@@ -61,24 +72,6 @@ function findFileInRoots(rootDirs: string[], targetFileName: string): string | n
     if (found) return found;
   }
   console.error(`Failed to find ${targetFileName} at ${rootDirs}`);
-  return null;
-}
-
-// 在root下递归查找文件
-function findFileRecursive(rootDir: string, targetFileName: string, allowDir: boolean): string | null {
-  if (!fs.existsSync(rootDir)) return null;
-
-  // 检查 rootDir 是否包含目标文件（带后缀）
-  const ret = findFile(rootDir, targetFileName, allowDir);
-  if (ret) return ret;
-
-  const entries = fs.readdirSync(rootDir, { withFileTypes: true });
-  for (const entry of entries) 
-    if (entry.isDirectory()) {
-      const result = findFileRecursive(path.join(rootDir, entry.name), targetFileName, allowDir);
-      if (result) return result;
-    }
-
   return null;
 }
 
@@ -131,7 +124,74 @@ function getLineAndColumn(pos: number, lineStarts: number[]) {
   };
 }
 
+// 构造import id from filePath的AST节点
+function constructImportAST(id: string, filePath: string): any {
+  return {
+    "kind": "ImportDeclaration",
+    "offset": 0,
+    "children": [
+      {
+        "kind": "ImportKeyword",
+        "offset": -1,
+        "text": "import",
+        position
+      },
+      {
+        "kind": "ImportClause",
+        "offset": -1,
+        "children": [
+          {
+            "kind": "NamespaceImport",
+            "offset": -1,
+            "children": [
+              {
+                "kind": "AsteriskToken",
+                "offset": -1,
+                "text": "*",
+                position
+              },
+              {
+                "kind": "AsKeyword",
+                "offset": -1,
+                "text": "as",
+                position
+              },
+              {
+                "kind": "Identifier",
+                "offset": -1,
+                "text": id,
+                position
+              }
+            ],
+            position
+          },
+        ],
+        "text": `* as ${id}`,
+        position
+      },
+      {
+        "kind": "FromKeyword",
+        "offset": -1,
+        "text": "from",
+        position
+      },
+      {
+        "kind": "StringLiteral",
+        "offset": -1,
+        "text": filePath,
+        position
+      },
+      {
+        "kind": "SemicolonToken",
+        "offset": -1,
+        "text": ";",
+        position
+      }]
+  }
+}
 
+let _dependencyMap : string[] = [];
+let __d_idx = 0;
 function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | null {
   if (ignoredKinds.has(node.getKind())) return null;
 
@@ -140,25 +200,185 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
     offset: node.getStart()
   };
 
-  const children: any[] = [];
-  node.forEachChild(child => {
-    const sc = serializeNode(child, isSDK, kitImports);
-    if (sc) children.push(sc);
-  });
-  if (children.length > 0) serialized.children = children;
-
-  const text = node.getWidth() <= 100 ? node.getText() : "";
-  if (text.length > 0 && text.length <= 100) {
-    serialized.text = text;
+  // 先序遍历部分
+  // 处理__d
+  if (node.getKind() === SyntaxKind.CallExpression && node.getChildAtIndex(0).getKind() === SyntaxKind.Identifier && node.getChildAtIndex(0).getText() === "__d") {
+    const stxlst = node.getChildAtIndex(2);
+    const arglst = stxlst.getChildAtIndex(4).getChildAtIndex(1); // arguments list
+    for (const arg of arglst.getChildren()) {
+      if (arg.getKind() === SyntaxKind.StringLiteral) {
+        _dependencyMap.push(arg.getText().replace(/['"]/g, ""));
+      }
+    }
+  } else if (node.getKind() === SyntaxKind.CallExpression && node.getChildAtIndex(0).getKind() === SyntaxKind.Identifier && node.getChildAtIndex(0).getText() === "_$$_REQUIRE") {
+    const idx = node.getChildAtIndex(2).getChildAtIndex(0).getChildAtIndex(2);
+    if (idx && idx.getKind() === SyntaxKind.FirstLiteralToken) {
+      const index = parseInt(idx.getText(), 10);
+      const dep = _dependencyMap[index];
+      if (dep) {
+        if (node.getParent()?.getKind() === SyntaxKind.PropertyAccessExpression) {
+          return {
+            "kind": "Identifier",
+            "offset": -1,
+            "text": `__dep_${index}`,
+            position
+          }
+        } else {
+          return {
+            "kind": "PropertyAccessExpression",
+            "offset": -1,
+            "children": [
+              { 
+                "kind": "Identifier",
+                "offset": -1,
+                "text": `__dep_${index}`,
+                position
+              },
+              {
+                "kind": "DotToken",
+                "offset": -1,
+                "text": ".",
+                position
+              },
+              {
+                "kind": "Identifier",
+                "offset": -1,
+                "text": "default",
+                position
+              }
+            ],
+            text: `__dep_${index}.default`,
+            position
+          }
+        }
+      }
+    } else {
+      console.warn(`Cannot parse dependency index in ${node.getText()}`);
+    }
   }
 
-  const start = node.getStart();
-  const end = node.getEnd();
-  const startPos = getLineAndColumn(start, lineStarts);
-  const endPos = getLineAndColumn(end, lineStarts);
-  serialized.position = { start: startPos, end: endPos };
 
-  if (node.getKind() === SyntaxKind.ImportDeclaration || node.getKind() === SyntaxKind.ExportDeclaration) {
+  const children: any[] = [];
+  for (const child of node.getChildren()) {
+    const sc = serializeNode(child, isSDK, kitImports);
+    if (sc !== null) children.push(sc);
+  }
+
+
+  // 后序处理部分
+  // 处理__d
+  if (node.getKind() === SyntaxKind.CallExpression && node.getChildAtIndex(0).getKind() === SyntaxKind.Identifier && node.getChildAtIndex(0).getText() === "__d") {
+    const stxlst = node.getChildAtIndex(2);
+    const module = stxlst.getChildAtIndex(2).getText().replace(/['"]/g, "");
+    const outputFilePath = path.join(outputDir, module.replace(/[\/\\]/g, "^") + ".ast.json");
+    const json = children[2].children[0].children[4].children[1];
+    let imports = [];
+    let cnt = 0;
+    for (const dep in _dependencyMap) {
+      imports.push(constructImportAST(`__dep_${cnt}`, _dependencyMap[cnt]));
+      cnt += 1;
+    }
+    if (imports.length > 0 || json.children) json.children = imports.concat(json.children);
+    _dependencyMap = [];
+    fs.mkdirSync(path.parse(outputFilePath).dir, { recursive: true });
+    writeJsonStream(outputFilePath, json); // module body
+    globalImportMap.set(module, outputFilePath);
+    console.log(`__d_idx = ${++__d_idx}`);
+    return null;
+  }
+  // 处理module.exports = xxx和exports.default = xxx
+  else if (node.getKind() === SyntaxKind.BinaryExpression && node.getChildAtIndex(0).getKind() === SyntaxKind.PropertyAccessExpression && (node.getChildAtIndex(0).getText() === "module.exports" || node.getChildAtIndex(0).getText() === "exports.default")) {
+    const exportNode = children[2];
+    return {
+      "kind": "ExportAssignment",
+      "offset": -1,
+      "children": [
+        {
+          "kind": "ExportKeyword",
+          "offset": -1,
+          "text": "export",
+          position
+        },
+        {
+          "kind": "DefaultKeyword",
+          "offset": -1,
+          "text": "default",
+          position
+        },
+        {
+          ...exportNode
+        }
+      ],
+      position
+    }
+  }
+  // 处理exports.xxx = xxx
+  else if (node.getKind() === SyntaxKind.BinaryExpression && node.getChildAtIndex(0).getKind() === SyntaxKind.PropertyAccessExpression && node.getChildAtIndex(0).getChildAtIndex(0).getText() === "exports") {
+    const exportName = node.getChildAtIndex(0).getChildAtIndex(2).getText();
+    const exportNode = children[2];
+    return {
+      "kind": "FirstStatement",
+      "offset": -1,
+      "children": [
+        {
+          "kind": "SyntaxList",
+          "offset": -1,
+          "children": [
+            {
+              "kind": "ExportKeyword",
+              "offset": -1,
+              "text": "export",
+              position
+            }
+          ],
+          "text": "export",
+          position
+        },
+        {
+          "kind": "VariableDeclarationList",
+          "offset": -1,
+          "children": [
+            {
+              "kind": "ConstKeyword",
+              "offset": -1,
+              "text": "const",
+              position
+            },
+            {
+              "kind": "SyntaxList",
+              "offset": -1,
+              "children": [
+                {
+                  "kind": "VariableDeclaration",
+                  "offset": -1,
+                  "children": [
+                    {
+                      "kind": "Identifier",
+                      "offset": 1316,
+                      "text": exportName,
+                      position
+                    },
+                    {
+                      "kind": "FirstAssignment",
+                      "offset": -1,
+                      "text": "=",
+                      position
+                    },
+                    {
+                      ...exportNode
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      position
+    }
+  }
+  // 处理import/export
+  else if (node.getKind() === SyntaxKind.ImportDeclaration || node.getKind() === SyntaxKind.ExportDeclaration) {
     const str = node.getChildren().find(c => c.getKind() === SyntaxKind.StringLiteral);
     const imptsNodes = findNodesByKind(node, SyntaxKind.Identifier).concat(findNodesByKind(node, SyntaxKind.AsteriskToken));
     const impts = imptsNodes?.map(n => n.getText());
@@ -167,8 +387,8 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
       let importPath = str.getText().replace(/['"]/g, "");
       const currentFile = node.getSourceFile().getFilePath();
       let fullPath: string | null;
-      let newKitImports : string[] = impts;
-      let isNextSDK : boolean;
+      let newKitImports: string[] = impts;
+      let isNextSDK: boolean;
       let resolved: string | null = null;
 
       if (importPath.startsWith(".")) {
@@ -236,8 +456,65 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
       dumpFile(resolved, isNextSDK, newKitImports, importPath);
     }
   }
+  
+  if (children.length > 0) serialized.children = children;
+  const text = node.getWidth() <= 100 ? node.getText() : "";
+  if (text.length > 0 && text.length <= 100) {
+    serialized.text = text;
+  }
+  const start = node.getStart();
+  const end = node.getEnd();
+  const startPos = getLineAndColumn(start, lineStarts);
+  const endPos = getLineAndColumn(end, lineStarts);
+  serialized.position = { start: startPos, end: endPos };
 
   return serialized;
+}
+
+function writeJsonStream(file: string, obj: any) {
+  const out = fs.createWriteStream(file, { flags: "w" });
+  const indent = "  "; // 2 spaces
+  let level = 0;
+
+  function newline() {
+    out.write("\n" + indent.repeat(level));
+  }
+
+  function writeValue(value: any) {
+    if (value === null) {
+      out.write("null");
+    } else if (Array.isArray(value)) {
+      out.write("[");
+      level++;
+      for (let i = 0; i < value.length; i++) {
+        newline();
+        writeValue(value[i]);
+        if (i < value.length - 1) out.write(",");
+      }
+      level--;
+      if (value.length > 0) newline();
+      out.write("]");
+    } else if (typeof value === "object") {
+      out.write("{");
+      const keys = Object.keys(value);
+      level++;
+      keys.forEach((k, i) => {
+        newline();
+        out.write(JSON.stringify(k) + ": ");
+        writeValue(value[k]);
+        if (i < keys.length - 1) out.write(",");
+      });
+      level--;
+      if (keys.length > 0) newline();
+      out.write("}");
+    } else {
+      out.write(JSON.stringify(value));
+    }
+  }
+
+  writeValue(obj);
+  out.write("\n");
+  out.end();
 }
 
 function dumpFile(filePath: string | null, isSDK = false, kitImports : string[] = [], importPath : string = "") {
@@ -252,7 +529,7 @@ function dumpFile(filePath: string | null, isSDK = false, kitImports : string[] 
   console.log(`AST dumping: ${absPath}`);
   const sourceFile = project.addSourceFileAtPath(absPath);
   lineStarts = buildLineMap(sourceFile.getFullText());
-  const astJson = serializeNode(sourceFile, isSDK, kitImports);
+  let astJson = serializeNode(sourceFile, isSDK, kitImports);
   let relativePath : string;
   let outputFilePath : string;
   if (!isSDK) {
@@ -266,10 +543,8 @@ function dumpFile(filePath: string | null, isSDK = false, kitImports : string[] 
     outputFilePath = path.join(outputDir + "/sdk", outputFileName);
   }
   fs.mkdirSync(path.parse(outputFilePath).dir, { recursive: true });
-  fs.writeFileSync(outputFilePath, JSON.stringify(astJson, null, 2), "utf8");
-  // writeJsonStream(outputFilePath, astJson);
-  // console.log(`AST dumped: ${outputFilePath}`);
-  if (importPath !== "") globalImportMap.set(importPath, outputFilePath); 
+  writeJsonStream(outputFilePath, astJson);
+  if (importPath !== "") globalImportMap.set(importPath, outputFilePath);
 }
 
 function collectSourceFiles(dir: string): string[] {

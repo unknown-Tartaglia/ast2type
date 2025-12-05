@@ -9,5 +9,5 @@ fi
 
 in=$1
 dir=${in%/}
-npx ts-node code2ast.ts -i "$dir"
-npx ts-node ast2type.ts -i "${dir}_output"
+node --max-old-space-size=40960 -r ts-node/register code2ast.ts -i "$dir"
+node --max-old-space-size=40960 -r ts-node/register ast2type.ts -i "${dir}_output"

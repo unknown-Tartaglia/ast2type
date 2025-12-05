@@ -11,7 +11,7 @@ file=$2
 
 # 用于汇总统计
 declare -A STATUS
-
+rm -f 1 2 3
 for input in $(find "$dir" -name "*.js"); do
     [ -e "$input" ] || continue  # 如果没有 json 文件则跳过
     [ -n "$file" ] && [[ "$(basename "$input")" != "$file" ]] && continue
