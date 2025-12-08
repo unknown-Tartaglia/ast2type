@@ -3,6 +3,7 @@ import * as path from "path";
 import { Command } from "commander";
 import { get } from "http";
 import { ts } from "ts-morph";
+import { serialize } from "v8";
 
 // 命令行参数解析
 const program = new Command();
@@ -20,7 +21,7 @@ const LOG_TYPENODE = false; // 是否开启类型节点日志
 const LOG_TYPENODE_VERBOSE = false; // 是否开启类型节点详细日志
 const LOG_IDENTIFIER_NODE = false; // 是否开启标识符节点日志
 const LOG_IMPORT = false; // 是否开启导入日志
-const LOG_TYPE_FLOW = false; // 是否开启类型流日志
+const LOG_TYPE_FLOW = true; // 是否开启类型流日志
 
 const DEDUCE_ONLY_WHEN_ALL_KNOWNN = false; // 仅在所有分支类型已知时进行类型推断
 
@@ -91,7 +92,7 @@ const tsMorphNodes = ["BigIntLiteral", "NumericLiteral", "FirstLiteralToken", "N
 const v8Nodes = ["Literal", "ObjectLiteral", "ArrayLiteral", "BinaryOperation", "UnaryOperation", "CountOperation", "RegExpLiteral", "VariableProxy", 
   "Conditional", "Property", "Call", "FunctionLiteral", "ReturnStatement", "TemplateLiteral", "CallNew"];
 const start = Date.now();
-const methods = ["log", "error", "warn", "info"] as const;
+const console_methods = ["log", "error", "warn", "info"] as const;
 
 // 返回[h:m:s]
 function getTimeElapsed(): string {
@@ -107,8 +108,7 @@ function getTimeElapsed(): string {
   return `[${pad(h)}:${pad(m)}:${pad(s)}] `;
 }
 
-
-for (const m of methods) {
+for (const m of console_methods) {
   const original = console[m];
 
   console[m] = (...args: any[]) => {
@@ -279,6 +279,13 @@ function serializeTypeNode(t: TypeNode): string {
   return ret;
 }
 
+// 反向索引：typeNodeId -> Set<typeVarId>
+const typeNodeUsers: Map<number, Set<number>> = new Map();
+function setTypeVar(vid : number, tid : number) {
+  typeSet.set(vid, tid);
+  typeNodeUsers.set(tid, (typeNodeUsers.get(tid) ?? new Set()).add(vid));
+}
+
 function newTypeNode(ty: TypeNode): number{
   if (LOG_TYPENODE_VERBOSE)
     console.log(`allocating new type node: ${JSON.stringify(ty)} ~~~ ${serializeTypeNode(ty)}`);
@@ -359,12 +366,16 @@ function newTypeNode(ty: TypeNode): number{
         }
         typeNodes.set(occur[t.id], t);
         typeNodeReverseMap.set(serializeTypeNode(t), occur[t.id]);
-        for (const [id, val] of typeSet)
-          if (val === occur[t.id])
+        const affected = typeNodeUsers.get(occur[t.id]);
+        if (affected) {
+          for (const id of affected) {
             worklist.push(id);
+          }
+        }
         return occur[t.id];
       }
       // console.log(`exit ${t.name}`)
+      // t.properties = Object.create(null);
     }
     serialized = serializeTypeNode(t);
     if (typeNodeReverseMap.has(serialized)) {
@@ -440,7 +451,7 @@ function mergeBranches(node : number, kinds? : string[]) : number {
         has_unknown = true;
         continue;
       }
-      const sig = printType(ty);
+      const sig = serializeTypeNode(typeNodes.get(ty)!);
       const old = seen.get(sig);
       if (old === undefined || old < ty) seen.set(sig, ty);
     }
@@ -604,13 +615,8 @@ function secondPass(filePath: string, node: AstNode) {
       syntaxNodes[node.varId!].v8kind = "ObjectLiteral"
       const lst = node.children?.find(n => n.kind === "SyntaxList");
       if (lst) {
-        if (lst.children) {
-          const typeId = newTypeNode({ kind: "object", name: `anonymous${node.varId!}`, id: node.varId!, properties: Object.create(null) });
-          allConstraints.push(["hasType", node.varId!, typeId, `new object`]);
-        } else {
-          const typeId = newTypeNode({ kind: "object", name: `empty object`, id: 0, properties: Object.create(null) });
-          allConstraints.push(["hasType", node.varId!, typeId, `new object`]);
-        }
+        const typeId = newTypeNode({ kind: "object", name: `anonymous${node.varId!}`, id: node.varId!, properties: Object.create(null) });
+        allConstraints.push(["hasType", node.varId!, typeId, `new object`]);
       }
     },
     // 赋予属性
@@ -648,18 +654,18 @@ function secondPass(filePath: string, node: AstNode) {
           const typeNode = node.children?.[index + 1];
           if (typeNode && typeNode.varId) {
             const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: UNKNOWN });
-            typeSet.set(idNode?.varId!, id);
+            setTypeVar(idNode?.varId!, id);
             allConstraints.push(["returnAnnotation", idNode?.varId!, typeNode.varId, `return type of function ${idNode?.text!}`]);
           }
         }
         else if (findNodesByKind(node, "ReturnStatement").length === 0) {
           // 如果没有返回类型注解并且没有Return语句
           const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: VOID });
-          typeSet.set(idNode?.varId!, id);
+          setTypeVar(idNode?.varId!, id);
         }
         else {
           const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: UNKNOWN });
-          typeSet.set(idNode?.varId!, id);
+          setTypeVar(idNode?.varId!, id);
         }
       }
     },
@@ -673,18 +679,18 @@ function secondPass(filePath: string, node: AstNode) {
           const typeNode = node.children?.[index + 1];
           if (typeNode && typeNode.varId) {
             const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: UNKNOWN });
-            typeSet.set(idNode?.varId!, id);
+            setTypeVar(idNode?.varId!, id);
             allConstraints.push(["returnAnnotation", idNode?.varId!, typeNode.varId, `return type of function ${idNode?.text!}`]);
           }
         }
         else if (findNodesByKind(node, "ReturnStatement").length === 0) {
           // 如果没有返回类型注解并且没有Return语句
           const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: idNode?.varId!, params: [], returnType: VOID });
-          typeSet.set(idNode?.varId!, id);
+          setTypeVar(idNode?.varId!, id);
         }
         else {
           const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: idNode?.varId!, params: [], returnType: UNKNOWN });
-          typeSet.set(idNode?.varId!, id);
+          setTypeVar(idNode?.varId!, id);
         }
       }
     },
@@ -781,7 +787,7 @@ function secondPass(filePath: string, node: AstNode) {
         const idNode = node.children?.filter(n => n.kind === "Identifier")[0];
         if (idNode && idNode.varId !== undefined) {
           const typeId = newTypeNode({ kind: "enum", name: idNode.text!, members: {} });
-          typeSet.set(idNode.varId!, typeId);
+          setTypeVar(idNode.varId!, typeId);
           varBindings.set(idNode.text!, idNode.varId!);
         }
 
@@ -810,7 +816,7 @@ function secondPass(filePath: string, node: AstNode) {
       newMembers[idNode.text!] = newTypeNode({ kind: "primitive", name: nb.text});
 
       const typeId = newTypeNode({ kind: "enum", name: idNode.text!, members: newMembers });
-      typeSet.set(paNode.varId!, typeId);
+      setTypeVar(paNode.varId!, typeId);
     },
     // 处理接口声明
     InterfaceDeclaration(node) {
@@ -818,7 +824,7 @@ function secondPass(filePath: string, node: AstNode) {
         const idNode = node.children?.filter(n => n.kind === "Identifier")[0];
         if (idNode && idNode.varId !== undefined) {
           const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
-          typeSet.set(idNode.varId!, typeId);
+          setTypeVar(idNode.varId!, typeId);
           varBindings.set(idNode.text!, idNode.varId!);
         }
 
@@ -885,7 +891,7 @@ function secondPass(filePath: string, node: AstNode) {
         }
 
         const typeId = newTypeNode(funcType);
-        typeSet.set(methodIdNode.varId!, typeId);
+        setTypeVar(methodIdNode.varId!, typeId);
 
         allConstraints.push(["initProperty", idNode.varId, methodIdNode.varId, `${idNode.text}.${methodIdNode.text!}`]);
         // allConstraints.push(["takeProperty", methodIdNode.varId!, idNode.varId!, `${methodIdNode.text!}.${idNode.text!}`]);
@@ -899,7 +905,7 @@ function secondPass(filePath: string, node: AstNode) {
           const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
           if (LOG_IDENTIFIER_NODE)
             console.log(`Class ${idNode.text} has type ID ${typeId}`);
-          typeSet.set(idNode.varId!, typeId);
+          setTypeVar(idNode.varId!, typeId);
           varBindings.set(idNode.text!, idNode.varId!);
 
           // 添加this指向
@@ -978,7 +984,7 @@ function secondPass(filePath: string, node: AstNode) {
           }
 
           const typeId = newTypeNode(funcType);
-          typeSet.set(propIdNode.varId!, typeId);
+          setTypeVar(propIdNode.varId!, typeId);
 
           allConstraints.push(["initProperty", idNode.varId, propIdNode.varId, `${idNode.text}.${propIdNode.text!}`]);
           // allConstraints.push(["takeProperty", propIdNode.varId!, idNode.varId!, `${propIdNode.text!}.${idNode.text!}`]);
@@ -997,7 +1003,7 @@ function secondPass(filePath: string, node: AstNode) {
           constructors[idNode.varId] = propIdNode?.varId;
           let funcType: TypeNode = { kind: "function", name: propIdNode?.text!, id: propIdNode?.varId!, params: [], returnType: VOID };
           const typeId = newTypeNode(funcType);
-          typeSet.set(propIdNode.varId!, typeId);
+          setTypeVar(propIdNode.varId!, typeId);
 
           allConstraints.push(["initProperty", idNode.varId, propIdNode.varId, `${idNode.text}.${propIdNode.text!}`]);
         }
@@ -1009,7 +1015,7 @@ function secondPass(filePath: string, node: AstNode) {
 
       if(idNode && idNode.varId) {
         const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
-        typeSet.set(idNode.varId!, typeId);
+        setTypeVar(idNode.varId!, typeId);
         varBindings.set(idNode.text!, idNode.varId!);
       }
     },
@@ -1036,7 +1042,7 @@ function secondPass(filePath: string, node: AstNode) {
       idNode = nsimpt?.children?.find(n => n.kind === "Identifier");
       if (idNode?.varId && idNode?.text) {
         const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
-        typeSet.set(idNode.varId!, typeId);
+        setTypeVar(idNode.varId!, typeId);
         varBindings.set(idNode.text, idNode.varId);
 
         if (!resolvedFile) {
@@ -1201,7 +1207,7 @@ function secondPass(filePath: string, node: AstNode) {
       syntaxNodes[node.varId!].v8kind = "ArrayLiteral"
       for (const child of node.children?.find(c => c.kind === "SyntaxList")?.children?.filter(c => c.kind !== "CommaToken") || []) {
         allConstraints.push(["makeArray", node.varId!, child.varId!, `element ${child.text!} of array ${node.text!}`]);
-        typeSet.set(node.varId!, newTypeNode({ kind: "array", elementType: UNKNOWN }));
+        setTypeVar(node.varId!, newTypeNode({ kind: "array", elementType: UNKNOWN }));
       }
     },
     TemplateExpression(node) {
@@ -1278,7 +1284,7 @@ function secondPass(filePath: string, node: AstNode) {
         const elementTypeNode = node.children[0];
         if (elementTypeNode.varId !== undefined && node.varId !== undefined) {
           allConstraints.push(["makeArray", node.varId, elementTypeNode.varId, `${node.text!} ∈ ${elementTypeNode.text}[]`]);
-          typeSet.set(node.varId!, newTypeNode({ kind: "array", elementType: UNKNOWN }) );
+          setTypeVar(node.varId!, newTypeNode({ kind: "array", elementType: UNKNOWN }) );
         }
       }
     },
@@ -1518,6 +1524,10 @@ function secondPass(filePath: string, node: AstNode) {
     Identifier(node) {
       if (tsMorphNodes.includes(node.parent?.kind!)) syntaxNodes[node.varId!].v8kind = "VariableProxy";
       if (node.text) {
+        if (node.text === "undefined") {
+          allConstraints.push(["hasType", node.varId!, UNDEFINED, `${node.text!} ∈ undefined`]);
+          return;
+        }
         let typeId = paramBindings.get(node.text);
 
         if (typeId !== undefined) {
@@ -1622,18 +1632,18 @@ function secondPass(filePath: string, node: AstNode) {
           const typeNode = node.children?.[index + 1];
           if (typeNode && typeNode.varId) {
             const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: node.varId!, params: [], returnType: UNKNOWN });
-            typeSet.set(node.varId!, id);
+            setTypeVar(node.varId!, id);
             allConstraints.push(["returnAnnotation", node?.varId!, typeNode.varId, `return type of function ${node?.text!}`]);
           }
         }
         else if (findNodesByKind(node, "ReturnStatement").length === 0) {
           // 如果没有返回类型注解并且没有Return语句
           const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: node?.varId!, params: [], returnType: VOID });
-         typeSet.set(node.varId!, id);
+         setTypeVar(node.varId!, id);
         }
         else {
           const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: node?.varId!, params: [], returnType: UNKNOWN });
-         typeSet.set(node.varId!, id);
+         setTypeVar(node.varId!, id);
         }
       }
 
@@ -1777,7 +1787,7 @@ function deriveVariableTypes() {
       if (syntaxNodes[a].kind === "Identifier") {
         graph.set(a, graph.get(a) ?? new Map());
       }
-      typeSet.set(a, b); source.set(a, new Map());
+      setTypeVar(a, b); source.set(a, new Map());
     } else if (kind !== "sameID") {
       if (kind === "funcToArg") {
         const func = find(Math.floor(b / 1000));
@@ -1796,7 +1806,7 @@ function deriveVariableTypes() {
       graph.set(b, graph.get(b) ?? new Map()); graph.get(b)!.set(a, kind);
       source.set(a, source.get(a) ?? new Map()); source.get(a)!.set(b, UNKNOWN);
       // if (kind === "setParamType" || kind === "initProperty") {
-      //   typeSet.set(b, UNKNOWN);
+      //   setTypeVar(b, UNKNOWN);
       // }
     }
   }
@@ -1840,7 +1850,7 @@ function deriveVariableTypes() {
         if (edgeKind === "annotation" && syntaxNodes[cur].file && !path.relative(process.cwd(), syntaxNodes[cur].file).split(path.sep).includes("sdk")) continue;
         // 如果是同类型
         source.get(next)!.set(cur, tSet);
-        typeSet.set(next, mergeBranches(next));
+        setTypeVar(next, mergeBranches(next));
       }
       else if (edgeKind === "takeProperty") {
         // 如果是取属性，添加属性类型
@@ -1860,7 +1870,7 @@ function deriveVariableTypes() {
               console.log(`takeProperty[enum] ${typeNode.members[propName]} for ${propName} in edge ${cur}->${next}`);
           }
         }
-        typeSet.set(next, mergeBranches(next) === UNKNOWN ? typeSet.get(next)! : mergeBranches(next));
+        setTypeVar(next, mergeBranches(next) === UNKNOWN ? typeSet.get(next)! : mergeBranches(next));
       }
       else if (edgeKind === "elementAccess") {
         // 取数组成员
@@ -1912,7 +1922,7 @@ function deriveVariableTypes() {
         } else {
           console.warn(`Unexpected elementAccess when type ${tSet} : ${printType(tSet)} is not array or object in edge ${cur}->${next}`);
         }
-        typeSet.set(next, mergeBranches(next));
+        setTypeVar(next, mergeBranches(next));
       }
       else if (edgeKind === "funcCall") {
         // 如果是函数调用，添加函数返回类型
@@ -1922,7 +1932,7 @@ function deriveVariableTypes() {
         } else {
           console.warn(`Unexpected funcCall when type ${tSet} : ${printType(tSet)} is not function in edge ${cur}->${next}`);
         }
-        typeSet.set(next, mergeBranches(next));
+        setTypeVar(next, mergeBranches(next));
       }
         
 
@@ -1984,7 +1994,7 @@ function deriveVariableTypes() {
             continue;
           }
           const id = newTypeNode({ kind: "array", elementType: mergeTypes([typeNode.elementType, tSet]) });
-          typeSet.set(next, id);
+          setTypeVar(next, id);
         }
       }
       else if (edgeKind === "initProperty") {
@@ -2008,7 +2018,7 @@ function deriveVariableTypes() {
 
 
         const id = newTypeNode({ kind: "object", name: typeNode.name, id: typeNode.id, properties: makePurePropertiesCopy(typeNode.properties, propName, tSet)});
-        typeSet.set(next, id);
+        setTypeVar(next, id);
       }
       else if (edgeKind === "setProperty") {
         // 如果是设置属性，添加属性类型
@@ -2030,7 +2040,7 @@ function deriveVariableTypes() {
         if (typeNode.kind === "object") {
           const dstty = typeNode?.kind === "object" ? typeNode.properties[propName!] ? mergeTypes([typeNode.properties[propName!], tSet]) : tSet : tSet;
           const id = newTypeNode({ kind: "object", name: typeNode.name, id: typeNode.id, properties: makePurePropertiesCopy(typeNode.properties, propName!, dstty) });
-          typeSet.set(next, id);
+          setTypeVar(next, id);
         } else if (typeNode.kind === "union") {
           let updated = false;
           const newTypes = typeNode.types.map(t => {
@@ -2045,7 +2055,7 @@ function deriveVariableTypes() {
             }
           });
           if (updated) {
-            typeSet.set(next, newTypeNode({ kind: "union", types: newTypes }));
+            setTypeVar(next, newTypeNode({ kind: "union", types: newTypes }));
           } else {
             console.warn(`setProperty on union type without object member ${printType(nSet)} in edge ${cur}->${next}`);
           }
@@ -2072,7 +2082,7 @@ function deriveVariableTypes() {
             const cleanPropName = propName.slice(1, -1);
             const dstty = typeNode?.kind === "object" ? typeNode.properties[cleanPropName] ? mergeTypes([typeNode.properties[cleanPropName], tSet]) : tSet : tSet;
             const id = newTypeNode({ kind: "object", name: typeNode.name, id: typeNode.id, properties: makePurePropertiesCopy(typeNode.properties, cleanPropName, dstty) });
-            typeSet.set(next, id);
+            setTypeVar(next, id);
           }
 
         } else if (typeNode.kind === "array") {
@@ -2083,7 +2093,7 @@ function deriveVariableTypes() {
           }
           const dstty = mergeTypes([typeNode.elementType, tSet]);
           const id = newTypeNode({ kind: "array", elementType: dstty });
-          typeSet.set(next, id);
+          setTypeVar(next, id);
         } else if (typeNode.kind === "union") {
           let updated = false;
           const newTypes = typeNode.types.map(t => {
@@ -2108,7 +2118,7 @@ function deriveVariableTypes() {
             }
           });
           if (updated) {
-            typeSet.set(next, newTypeNode({ kind: "union", types: newTypes }));
+            setTypeVar(next, newTypeNode({ kind: "union", types: newTypes }));
           } else {
             console.warn(`setElement on union type without object or array member ${printType(nSet)} in edge ${cur}->${next}`);
           }
@@ -2142,7 +2152,7 @@ function deriveVariableTypes() {
         //   if (curParamName !== paramName) continue;
         //   tylist.push(source[next][src]);
         // }
-        typeSet.set(next, newTypeNode({ kind: "function", name: typeNode.name, id: typeNode.id, params: [...typeNode.params.filter(pa => pa.name !== paramName), {name: paramName, type: /* mergeTypes(tylist) */tSet}], returnType: typeNode.returnType }));
+        setTypeVar(next, newTypeNode({ kind: "function", name: typeNode.name, id: typeNode.id, params: [...typeNode.params.filter(pa => pa.name !== paramName), {name: paramName, type: /* mergeTypes(tylist) */tSet}], returnType: typeNode.returnType }));
       }
       else if (edgeKind === "returnType" || edgeKind === "returnAnnotation") {
         if (edgeKind === "returnAnnotation" && syntaxNodes[cur].file && !path.relative(process.cwd(), syntaxNodes[cur].file).split(path.sep).includes("sdk")) continue;
@@ -2158,7 +2168,7 @@ function deriveVariableTypes() {
         }
 
         source.get(next)!.set(cur, tSet);
-        typeSet.set(next, newTypeNode({ kind: "function", name: typeNode.name, id: typeNode.id, params: typeNode.params, returnType: mergeBranches(next, ["returnType"/* , "returnAnnotation" */]) }));
+        setTypeVar(next, newTypeNode({ kind: "function", name: typeNode.name, id: typeNode.id, params: typeNode.params, returnType: mergeBranches(next, ["returnType"/* , "returnAnnotation" */]) }));
       }
 
 
@@ -2172,7 +2182,7 @@ function deriveVariableTypes() {
   // 传递sameID类型
   for (const [kind, a, b] of allConstraints) {
     if (kind === "sameID" && typeSet.get(b)) {
-      typeSet.set(a, typeSet.get(b)!);
+      setTypeVar(a, typeSet.get(b)!);
     }
   }
 
@@ -2446,7 +2456,7 @@ function main() {
   typeNodes.set(REGEXP, { kind: "primitive", name: "RegExp" });
   typeNodes.set(BIGINT, { kind: "primitive", name: "bigint" });
   // 初始化类型集合
-  typeSet.set(VOID, VOID)
+  setTypeVar(VOID, VOID)
   // 初始化typeNodeReverseMap
   for (const [id, node] of typeNodes.entries()) {
     typeNodeReverseMap.set(serializeTypeNode(node), Number(id));
