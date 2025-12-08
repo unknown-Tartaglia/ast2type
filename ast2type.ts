@@ -2428,8 +2428,7 @@ function emitGlobalTypeGraphAndConstraints() {
         morphKind: node.kind,
         location: node.offset,
         pos: node.position,
-        type: typeof(t) === "string" ? t : t.length === 1 ? t[0] : undefined,
-        unionTypes: typeof(t) !== "string" && t.length > 1 ? t : undefined,
+        type: t,
         relapath: node.file!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, ""),
         file: path.join(node.file!.split("ast" + require("path").sep)[0].replace("_output", ""), node.file!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")),
       })
