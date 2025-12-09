@@ -21,7 +21,10 @@ const LOG_TYPENODE = false; // 是否开启类型节点日志
 const LOG_TYPENODE_VERBOSE = false; // 是否开启类型节点详细日志
 const LOG_IDENTIFIER_NODE = false; // 是否开启标识符节点日志
 const LOG_IMPORT = false; // 是否开启导入日志
-const LOG_TYPE_FLOW = true; // 是否开启类型流日志
+const LOG_TYPE_FLOW = false; // 是否开启类型流日志
+const LOG_EVALUATE_STCS = false; // 是否评估groundtruth标注对比数据
+const LOG_TYPE_STCS = false; // 是否开启类型统计
+const LOG_OPERATOR_STCS = true; // 是否开启操作符统计（==, ===, !=, !==, !, typeof)
 
 const DEDUCE_ONLY_WHEN_ALL_KNOWNN = false; // 仅在所有分支类型已知时进行类型推断
 
@@ -93,6 +96,8 @@ const v8Nodes = ["Literal", "ObjectLiteral", "ArrayLiteral", "BinaryOperation", 
   "Conditional", "Property", "Call", "FunctionLiteral", "ReturnStatement", "TemplateLiteral", "CallNew"];
 const start = Date.now();
 const console_methods = ["log", "error", "warn", "info"] as const;
+const operator_cnts : Map<string, number> = new Map();
+const operands : Map<string, Set<number>> = new Map();
 
 // 返回[h:m:s]
 function getTimeElapsed(): string {
@@ -1357,7 +1362,13 @@ function secondPass(filePath: string, node: AstNode) {
       }
     },
     TypeOfExpression(node) {
-      syntaxNodes[node.varId!].v8kind = "UnaryOperation";
+      if (node.children && node.children.length >= 2) {
+        syntaxNodes[node.varId!].v8kind = "UnaryOperation";
+        const operator = node.children[0]!;
+        const operand = node.children[1]!;
+        operator_cnts.set(operator.text!, (operator_cnts.get(operator.text!) || 0) + 1);
+        operands.set(operator.text!, (operands.get(operator.text!) || new Set()).add(operand.varId!));
+      }
     },
     VoidExpression(node) {
       syntaxNodes[node.varId!].v8kind = "UnaryOperation";
@@ -1372,6 +1383,8 @@ function secondPass(filePath: string, node: AstNode) {
         const exprNode = node.children[1];
         syntaxNodes[node.varId!].offset = operator.offset;
         syntaxNodes[node.varId!].v8kind = operator.text === "++" || operator.text === "--" ? "CountOperation" : "UnaryOperation";
+        operator_cnts.set(operator.text!, (operator_cnts.get(operator.text!) || 0) + 1);
+        operands.set(operator.text!, (operands.get(operator.text!) || new Set()).add(exprNode.varId!));
         if (exprNode.varId !== undefined) {
           if (operator.kind === "ExclamationToken") {
             allConstraints.push(["hasType", node.varId!, BOOLEAN, `!${exprNode.text!} ∈ boolean`]);
@@ -1394,6 +1407,9 @@ function secondPass(filePath: string, node: AstNode) {
         const operator = node.children[1];
         const right = node.children[2];
         syntaxNodes[node.varId!].offset = operator.offset;
+        operator_cnts.set(operator.text!, (operator_cnts.get(operator.text!) || 0) + 1);
+        operands.set(operator.text!, (operands.get(operator.text!) || new Set()).add(left.varId!));
+        operands.set(operator.text!, (operands.get(operator.text!) || new Set()).add(right.varId!));
         // 处理赋值操作
         if (left.varId !== undefined && right.varId !== undefined && (operator.kind === "FirstAssignment" || operator.kind === "FirstCompoundAssignment" || operator.kind === "MinusEqualsToken" || operator.kind === "AsteriskEqualsToken" || operator.kind === "SlashEqualsToken" || operator.kind === "PercentEqualsToken" || operator.kind === "AsteriskAsteriskEqualsToken" || operator.kind === "AmpersandEqualsToken" || operator.kind === "BarEqualsToken")) {
           syntaxNodes[node.varId!].v8kind = operator.kind === "FirstAssignment" ? "Assignment" : "CompoundAssignment";
@@ -1819,9 +1835,8 @@ function deriveVariableTypes() {
       console.warn(`Node ${cur} has too many iterations (${cnt[cur]}), possible infinite loop`);
       break;
     }
-    console.log(`Processing node ${cur} (${syntaxNodes[cur]?.text}) with ${cnt[cur]} iterations, worklist size: ${worklist.length}, node edges ${graph.get(cur)?.size ?? 0}`);
     if (LOG_TYPE_FLOW) {
-      console.log(`Processing node ${cur} (${syntaxNodes[cur]?.text}) with ${cnt[cur]} iterations:`);
+      console.log(`Processing node ${cur} (${syntaxNodes[cur]?.text}) with ${cnt[cur]} iterations, worklist size: ${worklist.length}, node edges ${graph.get(cur)?.size ?? 0}`);
 
       // 输出 Types
       if (typeSet.get(cur)) {
@@ -1842,8 +1857,9 @@ function deriveVariableTypes() {
     for (const next of edges.keys()) {
       const nSet = typeSet.get(next);
       const edgeKind = graph.get(cur)!.get(next)!;
-      console.log(`  Processing edge ${cur} -> ${next} of kind ${edgeKind}, merge difficulty: ${source.get(next)?.size ?? 0}`);
-
+      if (LOG_TYPE_FLOW) {
+        console.log(`  Processing edge ${cur} -> ${next} of kind ${edgeKind}, merge difficulty: ${source.get(next)?.size ?? 0}`);
+      }
 
       //  数据流处理
       if (edgeKind === "sameType" || edgeKind === "ArgToParam" || edgeKind === "annotation") {
@@ -2325,7 +2341,7 @@ function evaluate() {
 // 输出图和约束
 function emitGlobalTypeGraphAndConstraints() {
   const types = deriveVariableTypes();
-  evaluate();
+  if(LOG_EVALUATE_STCS) evaluate();
 
   const outDir = path.join(outputDir, "typegraph");
   fs.mkdirSync(outDir, { recursive: true });
@@ -2476,7 +2492,8 @@ function main() {
 
   mergeIdentifiers();
   emitGlobalTypeGraphAndConstraints();
-  analyzeIdentifierTypeFeatures();
+  if (LOG_TYPE_STCS) analyzeIdentifierTypeFeatures();
+  if (LOG_OPERATOR_STCS) analyzeOperators();
 }
 
 // 递归获取所有 AST 文件
@@ -2575,4 +2592,57 @@ function analyzeIdentifierTypeFeatures() {
   }
 
   return result;
+}
+
+// ===== 分析操作符 =====
+function analyzeOperators() {
+  let total_operators = 0;
+  let needed_operators = 0;
+  let total_operands = 0;
+  const map = new Map<string, Map<string, number>>();
+  const map_cnt = new Map<string, number>();
+
+  for (const [key, value] of operator_cnts.entries()) {
+    total_operators += value;
+    if (["==", "===", "!=", "!==", "!", "typeof"].includes(key)) needed_operators += value;
+  }
+
+  for (const [key, value] of operator_cnts.entries()) {
+    console.log(`Operator ${key}: ${value} occurrences, ${(value / total_operators * 100).toFixed(2)}%`);
+  }
+
+  for (const [key, value] of operands.entries()) {
+    if (["==", "===", "!=", "!==", "!", "typeof"].includes(key)) {
+      for (const v of value) {
+        if (!syntaxNodes[v].v8kind) continue;
+        const tyNode = typeNodes.get(typeSet.get(v) ?? UNKNOWN);
+        if (!tyNode) continue;
+        total_operands++;
+        let name;
+        switch (tyNode.kind) {
+          case "primitive": name = tyNode.name; break;
+          case "object":
+          case "function":
+          case "array":
+          case "union": name = tyNode.kind; break;
+          default: name = "unknown"; break;
+        }
+        if (!map.has(key)) map.set(key, new Map<string, number>());
+        const submap = map.get(key)!;
+        submap.set(name, (submap.get(name) ?? 0) + 1);
+        map_cnt.set(key, (map_cnt.get(key) ?? 0) + 1);
+      }
+    }
+  }
+
+  console.log("========== Operator Operand Type Report ==========");
+  console.log(`Needed operator / Total operator = ${needed_operators} / ${total_operators} = ${((needed_operators / total_operators) * 100).toFixed(2)}%`);
+  console.log(`Total operands for needed operators: ${total_operands}`);
+  for (const [key, val] of map) {
+    console.log(`-- Operator: ${key} --`);
+    const tot = map_cnt.get(key)!;
+    for (const [k, v] of val) {
+      console.log(`   Type ${k}: ${v} occurrences, ${((v / tot) * 100).toFixed(2)}%`);
+    }
+  }
 }
