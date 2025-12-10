@@ -1406,12 +1406,20 @@ function secondPass(filePath: string, node: AstNode) {
         const left = node.children[0];
         const operator = node.children[1];
         const right = node.children[2];
-        syntaxNodes[node.varId!].offset = operator.offset;
+        if (!left.varId || !right.varId) return;
+        if(syntaxNodes[node.varId!].v8kind !== "NaryOperation") syntaxNodes[node.varId!].offset = operator.offset;
         operator_cnts.set(operator.text!, (operator_cnts.get(operator.text!) || 0) + 1);
-        operands.set(operator.text!, (operands.get(operator.text!) || new Set()).add(left.varId!));
-        operands.set(operator.text!, (operands.get(operator.text!) || new Set()).add(right.varId!));
+        operands.set(operator.text!, (operands.get(operator.text!) || new Set()).add(left.varId));
+        operands.set(operator.text!, (operands.get(operator.text!) || new Set()).add(right.varId));
+
+        const assignmentOperators = ["FirstAssignment","FirstCompoundAssignment","MinusEqualsToken","AsteriskEqualsToken","SlashEqualsToken","PercentEqualsToken","AsteriskAsteriskEqualsToken","AmpersandEqualsToken","BarEqualsToken"];
+        const arithmeticOperators = ["PlusToken","MinusToken","AsteriskToken","SlashToken","PercentToken","AsteriskAsteriskToken"];
+        const logicalOperators = ["AmpersandAmpersandToken", "BarBarToken", "QuestionQuestionToken"];
+        const comparisonOperators = ["LessThanToken","GreaterThanToken","LessThanEqualsToken","GreaterThanEqualsToken","EqualsEqualsToken","ExclamationEqualsToken","EqualsEqualsEqualsToken","ExclamationEqualsEqualsToken"];
+        const bitwiseOperators = ["AmpersandToken","BarToken","CaretToken","TildeToken","LessThanLessThanToken","GreaterThanGreaterThanToken","GreaterThanGreaterThanGreaterThanToken"];
+
         // 处理赋值操作
-        if (left.varId !== undefined && right.varId !== undefined && (operator.kind === "FirstAssignment" || operator.kind === "FirstCompoundAssignment" || operator.kind === "MinusEqualsToken" || operator.kind === "AsteriskEqualsToken" || operator.kind === "SlashEqualsToken" || operator.kind === "PercentEqualsToken" || operator.kind === "AsteriskAsteriskEqualsToken" || operator.kind === "AmpersandEqualsToken" || operator.kind === "BarEqualsToken")) {
+        if (assignmentOperators.includes(operator.kind)) {
           syntaxNodes[node.varId!].v8kind = operator.kind === "FirstAssignment" ? "Assignment" : "CompoundAssignment";
           syntaxNodes[left.varId!].v8kind = undefined;
           allConstraints.push(["sameType", left.varId, right.varId, `${left.text!} = ${right.text!}`]);
@@ -1427,25 +1435,45 @@ function secondPass(filePath: string, node: AstNode) {
           }
         }
         // 处理加减乘除模运算
-        else if (left.varId !== undefined && right.varId !== undefined && (operator.kind === "PlusToken" || operator.kind === "MinusToken" || operator.kind === "AsteriskToken" || operator.kind === "SlashToken" || operator.kind === "PercentToken" || operator.kind === "AsteriskAsteriskToken")) {
+        else if (arithmeticOperators.includes(operator.kind)) {
           // allConstraints.push(["sameType", left.varId!, right.varId!, `${left.text!} == ${right.text!}`]);
-          syntaxNodes[node.varId!].v8kind = "BinaryOperation";
+          syntaxNodes[node.varId!].v8kind ??= "BinaryOperation";
+          if (node.parent?.kind === "BinaryExpression" && node.parent.children?.[1].kind === operator.kind) {
+            syntaxNodes[node.parent.varId!].v8kind = "NaryOperation";
+            syntaxNodes[node.parent.varId!].offset = node.parent.offset;
+            syntaxNodes[node.varId!].v8kind = "invisible";
+          }
           allConstraints.push(["sameType", node.varId!, right.varId!, `${node.text!} = ${right.text!}`]);
           allConstraints.push(["sameType", node.varId!, left.varId!, `${node.text!} == ${left.text!}`]);
         }
         // 处理逻辑运算
-        else if (left.varId !== undefined && right.varId !== undefined && (operator.kind === "AmpersandAmpersandToken" || operator.kind === "BarBarToken")) {
-          syntaxNodes[node.varId!].v8kind = "BinaryOperation";
+        else if (logicalOperators.includes(operator.kind)) {
+          syntaxNodes[node.varId!].v8kind ??= "BinaryOperation";
+          if (node.parent?.kind === "BinaryExpression" && node.parent.children?.[1].kind === operator.kind) {
+            syntaxNodes[node.parent.varId!].v8kind = "NaryOperation";
+            syntaxNodes[node.parent.varId!].offset = node.parent.offset;
+            syntaxNodes[node.varId!].v8kind = "invisible";
+          }
           allConstraints.push(["sameType", node.varId!, left.varId!, `${node.text!} = ${left.text!}`]);
           allConstraints.push(["sameType", node.varId!, right.varId!, `${node.text!} = ${right.text!}`]);
         }
         // 处理比较运算
-        else if (left.varId !== undefined && right.varId !== undefined && (operator.kind === "LessThanToken" || operator.kind === "GreaterThanToken" || operator.kind === "LessThanEqualsToken" || operator.kind === "GreaterThanEqualsToken" || operator.kind === "EqualsEqualsToken" || operator.kind === "ExclamationEqualsToken" || operator.kind === "EqualsEqualsEqualsToken" || operator.kind === "ExclamationEqualsEqualsToken")) {
+        else if (comparisonOperators.includes(operator.kind)) {
           allConstraints.push(["hasType", node.varId!, BOOLEAN, `${node.text!} ∈ boolean`]);
           syntaxNodes[node.varId!].v8kind = "CompareOperation";
           // 认为是同一类型
           // allConstraints.push(["sameType", left.varId, right.varId, `${left.text!} ${operator.text} ${right.text}`]);
           // allConstraints.push(["sameType", right.varId, left.varId, `${left.text!} ${operator.text} ${right.text}`]);
+        }
+        // 处理位运算
+        else if (bitwiseOperators.includes(operator.kind)) {
+          syntaxNodes[node.varId!].v8kind ??= "BinaryOperation";
+          if (node.parent?.kind === "BinaryExpression" && node.parent.children?.[1].kind === operator.kind) {
+            syntaxNodes[node.parent.varId!].v8kind = "NaryOperation";
+            syntaxNodes[node.parent.varId!].offset = node.parent.offset;
+            syntaxNodes[node.varId!].v8kind = "invisible";
+          }
+          allConstraints.push(["hasType", node.varId!, NUMBER, `${left.text} ${operator.text} ${right.text}`]);
         }
         // TODO: 更多二元运算
       }
@@ -2436,7 +2464,7 @@ function emitGlobalTypeGraphAndConstraints() {
       const id = Number(idstr)
       const node = syntaxNodes[id];
       const t = printJsonType(typeSet.get(id) ?? UNKNOWN);
-      if (t === "unknown" || !node.v8kind) continue;
+      if (t === "unknown" || !node.v8kind || node.v8kind === "invisible") continue;
       outJson.push({
         context: node.context,
         exprText: node.text,
