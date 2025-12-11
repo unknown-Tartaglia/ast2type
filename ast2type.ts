@@ -1,9 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
 import { Command } from "commander";
-import { get } from "http";
-import { ts } from "ts-morph";
-import { serialize } from "v8";
 
 // 命令行参数解析
 const program = new Command();
@@ -49,6 +46,7 @@ interface Param {
 // Type 类型结构体
 type TypeNode =
   | { kind: "primitive"; name: string }
+  | { kind: "literal"; value: string | number | boolean }
   | { kind: "array"; elementType: number }
   | { kind: "function"; name: string; id: number; params: Param[]; returnType: number }
   | { kind: "union"; types: number[] }
@@ -167,6 +165,8 @@ function printType(n: number): string {
     switch (t.kind) {
       case "primitive":
         return t.name;
+      case "literal":
+        return `literal:${t.value}`;
       case "array":
         return helper(t.elementType) + "[]";
       case "function":
@@ -197,6 +197,8 @@ function printFullType(n: number): string {
     switch (t.kind) {
       case "primitive":
         return t.name;
+      case "literal":
+        return `literal:${t.value}`;
       case "array":
         return helper(t.elementType) + "[]";
       case "function":
@@ -232,6 +234,8 @@ function printJsonType(typeId: number): any {
   switch (node.kind) {
     case "primitive":
       return node.name;
+    case "literal":
+      return (typeof node.value) + " constant";
     case "union":
       return Array.from(new Set(node.types.map(t => printJsonType(t))));
     case "array":
@@ -264,6 +268,9 @@ function serializeTypeNode(t: TypeNode): string {
   switch (t.kind) {
     case "primitive":
       ret = `primitive:${t.name}`;
+      break;
+    case "literal":
+      ret = `literal:${t.value}`;
       break;
     case "array":
       ret = `array:${t.elementType}`;
@@ -402,17 +409,21 @@ function newTypeNode(ty: TypeNode): number{
 }
 
 function mergeTypes(tys: number[]) : number {
-  let tyList : number[] = [], ret : number;
-  for (const ty of tys) {
-    const typeNode = typeNodes.get(ty);
-    if (typeNode?.kind === "union") 
-      tyList = tyList.concat([...typeNode.types]);
-    else tyList.push(ty);
+  let tyList : number[] = [], ret : number, has_unknown = false; 
+  const tmp = tys.map(ty => { const typeNode = typeNodes.get(ty); return typeNode?.kind === "union" ? [...typeNode.types] : [ty] }).flat();
+  const set = new Set(tmp.filter(ty => ty !== UNKNOWN));
+  if (tmp.includes(UNKNOWN)) {
+    // 保护，存在unknown就不推导Literal
+    has_unknown = true;
+    if(DEDUCE_ONLY_WHEN_ALL_KNOWNN)  return UNKNOWN;
   }
-  
-
-  tyList = [...new Set(tyList.filter(ty => ty !== UNKNOWN))];
-
+  for (const ty of set) {
+    const typeNode = typeNodes.get(ty);
+    let cand = ty;
+    if (typeNode?.kind === "literal" && (set.size > 1 || has_unknown)) cand = typeof typeNode.value === "number" ? NUMBER : typeof typeNode.value === "string" ? STRING : BOOLEAN;
+    tyList.push(cand);
+  }
+  tyList = [...new Set(tyList)]; // 去重
 
   if (tyList.length === 1) {
     ret = tyList[0];
@@ -429,52 +440,15 @@ function mergeTypes(tys: number[]) : number {
 
 // 合并不同分支类型
 function mergeBranches(node : number, kinds? : string[]) : number {
-  let ret : number;
-  if (source.get(node)?.size === 1) {
-    const src = source.get(node)!.keys().next().value!;
-    if (kinds && !kinds.includes(graph.get(src)?.get(node) ?? "")) {
-      console.warn(`Unexpected merge branches when branchNum = 1 && edge ${src}->${node} not in type ${[...kinds]}`);
-    }
-    ret = source.get(node)?.get(src)!;
-  }
-  else {
-    let tyList : number[] = [];
-    for (const src of source.get(node)!.keys()) {
-      if (kinds && !kinds.includes(graph.get(src)?.get(node) ?? "") || !kinds && (graph.get(src)?.get(node) ?? "") === "returnType") continue;
-      const ty = source.get(node)!.get(src)!;
-      const typeNode = typeNodes.get(ty);
-      if (typeNode?.kind === "union") 
-        tyList = tyList.concat([...typeNode.types]);
-      else tyList.push(ty);
-    }
-
-    
-    const seen = new Map<string, number>();
-    let has_unknown = false;
-    for (const ty of tyList) {
-      if (ty === UNKNOWN) {
-        has_unknown = true;
-        continue;
-      }
-      const sig = serializeTypeNode(typeNodes.get(ty)!);
-      const old = seen.get(sig);
-      if (old === undefined || old < ty) seen.set(sig, ty);
-    }
-    if (DEDUCE_ONLY_WHEN_ALL_KNOWNN && has_unknown) return UNKNOWN;
-    tyList = [...seen.values()];    
-
-
-    if (tyList.length === 1) {
-      ret = tyList[0];
-    } else if (tyList.length > 1) {
-      ret = newTypeNode( { kind: "union", types: tyList});
-    } else {
-      ret = UNKNOWN;
+  const tys = [];
+  for (const src of source.get(node)?.keys()!) {
+    if (!kinds || kinds && kinds.includes(graph.get(src)?.get(node) ?? "")) {
+      tys.push(source.get(node)!.get(src)!);
     }
   }
   if (LOG_TYPE_FLOW) 
-    console.log(`merge branches at ${node} from ${[...source.get(node)?.keys()!]} to ${ret} as ${serializeTypeNode(typeNodes.get(ret)!)}`)
-  return ret;
+    console.log(`merge branches at ${node}`)
+  return mergeTypes(tys);
 }
 
 function makePurePropertiesCopy(
@@ -618,31 +592,8 @@ function secondPass(filePath: string, node: AstNode) {
     // 处理匿名对象
     ObjectLiteralExpression(node) {
       syntaxNodes[node.varId!].v8kind = "ObjectLiteral"
-      const lst = node.children?.find(n => n.kind === "SyntaxList");
-      if (lst) {
-        const typeId = newTypeNode({ kind: "object", name: `anonymous${node.varId!}`, id: node.varId!, properties: Object.create(null) });
-        allConstraints.push(["hasType", node.varId!, typeId, `new object`]);
-      }
-    },
-    // 赋予属性
-    PropertyAssignment(node) {
-      if (node.children?.length === 3) {
-        // 清楚引号
-        const idNode = node.children[0].kind === "StringLiteral" ? node.children[0].text?.slice(1, -1) : node.children[0].text;
-        if (!idNode) return;
-        node.children[2].text = idNode;
-        const obj = node.parent?.parent;
-        if (!obj || !obj.varId) return;
-        allConstraints.push(["initProperty", obj.varId, node.children[2].varId!, idNode!]);
-      }
-    },
-    // 短赋予属性
-    ShorthandPropertyAssignment(node) {
-      if (node.children) {
-        const obj = node.parent?.parent;
-        if (!obj || !obj.varId) return;
-        allConstraints.push(["initProperty", obj.varId, node.children[0].varId!, node.children[0].text!]);
-      }
+      const typeId = newTypeNode({ kind: "object", name: `anonymous${node.varId!}`, id: node.varId!, properties: Object.create(null) });
+      allConstraints.push(["hasType", node.varId!, typeId, `new object`]);
     },
     // 处理函数声明
     FunctionDeclaration(node) {
@@ -1173,27 +1124,27 @@ function secondPass(filePath: string, node: AstNode) {
 
   const handlers: Record<string, (node: AstNode) => void> = {
     StringLiteral(node) {
-      allConstraints.push(["hasType", node.varId!, STRING, `${node.text!} ∈ string`]);
+      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: node.text ?? "unknown text"}), `${node.text!} ∈ string`]);
       syntaxNodes[node.varId!].v8kind = "Literal"
     },
     NoSubstitutionTemplateLiteral(node) {
-      allConstraints.push(["hasType", node.varId!, STRING, `${node.text!} ∈ string`]);
+      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: node.text ?? "unknown text"}), `${node.text!} ∈ string`]);
     },
     FirstLiteralToken(node) {
       // 暂时默认为数字
-      allConstraints.push(["hasType", node.varId!, NUMBER, `${node.text!} ∈ number`]);
+      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: Number(node.text)}), `${node.text!} ∈ number`]);
       syntaxNodes[node.varId!].v8kind = "Literal"
     },
     NumericLiteral(node) {
-      allConstraints.push(["hasType", node.varId!, NUMBER, `${node.text!} ∈ number`]);
+      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: Number(node.text)}), `${node.text!} ∈ number`]);
       syntaxNodes[node.varId!].v8kind = "Literal"
     },
     TrueKeyword(node) {
-      allConstraints.push(["hasType", node.varId!, BOOLEAN, `${node.text!} ∈ boolean`]);
+      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: true}), `${node.text!} ∈ boolean`]);
       syntaxNodes[node.varId!].v8kind = "Literal"
     },
     FalseKeyword(node) {
-      allConstraints.push(["hasType", node.varId!, BOOLEAN, `${node.text!} ∈ boolean`]);
+      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: false}), `${node.text!} ∈ boolean`]);
       syntaxNodes[node.varId!].v8kind = "Literal"
     },
     NullKeyword(node) {
@@ -1201,7 +1152,7 @@ function secondPass(filePath: string, node: AstNode) {
       syntaxNodes[node.varId!].v8kind = "Literal"
     },
     BigIntLiteral(node) {
-      allConstraints.push(["hasType", node.varId!, NUMBER, `${node.text!} ∈ number`]);
+      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: Number(node.text)}), `${node.text!} ∈ number`]);
       syntaxNodes[node.varId!].v8kind = "Literal"
     },
     RegularExpressionLiteral(node) {
@@ -1210,9 +1161,9 @@ function secondPass(filePath: string, node: AstNode) {
     },
     ArrayLiteralExpression(node) {
       syntaxNodes[node.varId!].v8kind = "ArrayLiteral"
+      setTypeVar(node.varId!, newTypeNode({ kind: "array", elementType: UNKNOWN }));
       for (const child of node.children?.find(c => c.kind === "SyntaxList")?.children?.filter(c => c.kind !== "CommaToken") || []) {
         allConstraints.push(["makeArray", node.varId!, child.varId!, `element ${child.text!} of array ${node.text!}`]);
-        setTypeVar(node.varId!, newTypeNode({ kind: "array", elementType: UNKNOWN }));
       }
     },
     TemplateExpression(node) {
@@ -1343,6 +1294,27 @@ function secondPass(filePath: string, node: AstNode) {
         if (idNode.varId !== undefined) {
           allConstraints.push(["sameID", node.varId!, idNode.varId, `TypeReference ${idNode.text!}`]);
         }
+      }
+    },
+    // 赋予属性
+    PropertyAssignment(node) {
+      if (node.children?.length === 3) {
+        // 清楚引号
+        const idNode = node.children[0].kind === "StringLiteral" ? node.children[0].text?.slice(1, -1) : node.children[0].text;
+        if (!idNode) return;
+        syntaxNodes[node.children[2].varId!].text = idNode;
+        syntaxNodes[node.children[2].varId!].v8kind = undefined;
+        const obj = node.parent?.parent;
+        if (!obj || !obj.varId) return;
+        allConstraints.push(["initProperty", obj.varId, node.children[2].varId!, idNode!]);
+      }
+    },
+    // 短赋予属性
+    ShorthandPropertyAssignment(node) {
+      if (node.children) {
+        const obj = node.parent?.parent;
+        if (!obj || !obj.varId) return;
+        allConstraints.push(["initProperty", obj.varId, node.children[0].varId!, node.children[0].text!]);
       }
     },
     FirstNode(node) {
@@ -1505,17 +1477,6 @@ function secondPass(filePath: string, node: AstNode) {
           const propName = right.text;
           if (propName) {
             allConstraints.push(["takeProperty", node.varId!, left.varId!, `${left.text!}.${propName}`]);
-          }
-        }
-      }
-    },
-    PropertyAssignment(node) {
-      if (node.children) {
-        const index = node.children?.findIndex(n => n.kind === "ColonToken");
-        if (index !== undefined && index !== -1) {
-          const right = node.children?.[index + 1];
-          if (right && right.varId) {
-            // syntaxNodes[right.varId].v8kind = undefined;
           }
         }
       }
@@ -1849,9 +1810,9 @@ function deriveVariableTypes() {
       if (b === a) continue; // 避免自引用
       graph.set(b, graph.get(b) ?? new Map()); graph.get(b)!.set(a, kind);
       source.set(a, source.get(a) ?? new Map()); source.get(a)!.set(b, UNKNOWN);
-      // if (kind === "setParamType" || kind === "initProperty") {
-      //   setTypeVar(b, UNKNOWN);
-      // }
+      if (kind === "setParamType" || kind === "initProperty") {
+        setTypeVar(b, typeSet.get(b) ?? UNKNOWN);
+      }
     }
   }
 
@@ -1859,7 +1820,7 @@ function deriveVariableTypes() {
   while (worklist.length > 0) {
     const cur = worklist.pop()!;
     cnt[cur] = (cnt[cur] ?? 0) + 1;
-    if (cnt[cur] > 200) {
+    if (cnt[cur] > 20000) {
       console.warn(`Node ${cur} has too many iterations (${cnt[cur]}), possible infinite loop`);
       break;
     }
