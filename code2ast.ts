@@ -354,7 +354,7 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
                   "children": [
                     {
                       "kind": "Identifier",
-                      "offset": 1316,
+                      "offset": -1,
                       "text": exportName,
                       position
                     },
