@@ -14,11 +14,11 @@ const inputDir = path.resolve(options.input);
 const outputDir = options.output ? path.resolve(options.output) : path.resolve("./output");
 
 const LOG_SCOPE = false; // 是否开启日志作用域
-const LOG_TYPENODE = false; // 是否开启类型节点日志
+const LOG_TYPENODE = true; // 是否开启类型节点日志
 const LOG_TYPENODE_VERBOSE = false; // 是否开启类型节点详细日志
 const LOG_IDENTIFIER_NODE = false; // 是否开启标识符节点日志
 const LOG_IMPORT = false; // 是否开启导入日志
-const LOG_TYPE_FLOW = false; // 是否开启类型流日志
+const LOG_TYPE_FLOW = true; // 是否开启类型流日志
 const LOG_EVALUATE_STCS = false; // 是否评估groundtruth标注对比数据
 const LOG_TYPE_STCS = false; // 是否开启类型统计
 const LOG_OPERATOR_STCS = true; // 是否开启操作符统计（==, ===, !=, !==, !, typeof)
@@ -124,6 +124,33 @@ function getTypeVarId(node: AstNode): number {
   const id = typeVarCounter++;
   node.varId = id;
   return id;
+}
+
+function allocateTypeNode(t: TypeNode): number {
+  const id = typeVarCounter++;
+  const serialized = serializeTypeNode(t);
+  typeNodes.set(id, t);
+  typeNodeReverseMap.set(serialized, id);
+  if (LOG_TYPENODE) {
+    console.log(`New type node created: ${id} : ${printFullType(id)}`);
+  }
+  return id;
+}
+
+// 修改TypeNode，危险操作，传播影响
+function modifyTypeNode(id: number, t: TypeNode) {
+  if (LOG_TYPENODE) {
+    console.log(`Change type node ${id} from ${JSON.stringify(typeNodes.get(id)!) } to ${JSON.stringify(t)}`);
+  }
+  typeNodes.set(id, t);
+  typeNodeReverseMap.set(serializeTypeNode(t), id);
+  // 传播影响
+  const affected = typeNodeUsers.get(id);
+  if (affected) {
+    for (const id of affected) {
+      worklist.push(id);
+    }
+  }
 }
 
 function findNodesByKind(root: AstNode, kind: string): AstNode[] {
@@ -306,23 +333,18 @@ function newTypeNode(ty: TypeNode): number{
     const id = typeNodeReverseMap.get(serialized);
     return id!;
   }
-
+  console.log(`allocating new type node: ${JSON.stringify(ty)} ~~~ ${serializeTypeNode(ty)}`);
 
   // 处理对象类型的循环引用
   const occur: Record<string, number> = Object.create(null);
-  return helper(ty);
+  return ["object", "function"].includes(ty.kind) ? helper(ty) : allocateTypeNode(ty);
   function helper(t: TypeNode): number {
     if (!t) {
       // if (LOG_TYPENODE)
         console.warn(`Undefined typeNode in newTypeNode`);
       return UNKNOWN; // 返回UNKNOWN
     }
-    if (t.kind === "array") {
-      const ret = helper(typeNodes.get(t.elementType)!);
-      if (t.elementType !== ret) {
-        t.elementType = ret;
-      }
-    }
+    if (t.kind === "array") t.elementType = helper(typeNodes.get(t.elementType)!);
     else if (t.kind === "function") {
       if (occur[t.id] !== undefined) {
         occur[t.id] = newTypeNode(t)
@@ -331,31 +353,16 @@ function newTypeNode(ty: TypeNode): number{
       occur[t.id] = UNKNOWN;
 
       for (const param of t.params) {
-        const ret = helper(typeNodes.get(param.type)!);
-        if (param.type !== ret) {
-          param.type = ret;
-        }
+        param.type = helper(typeNodes.get(param.type)!);
       }
-      const returnType = helper(typeNodes.get(t.returnType)!);
-      if (t.returnType !== returnType) {
-        t.returnType = returnType;
-      }
+      t.returnType = helper(typeNodes.get(t.returnType)!);
 
       if (occur[t.id] !== UNKNOWN && serializeTypeNode(typeNodes.get(occur[t.id])!) !== serializeTypeNode(t)) {
-        // 修改TypeNode，危险操作，传播影响
-        if (LOG_TYPENODE) {
-          console.log(`Change type node ${occur[t.id]} from ${JSON.stringify(typeNodes.get(occur[t.id])!) } to ${JSON.stringify(t)}`);
-        }
-        typeNodes.set(occur[t.id], t);
-        typeNodeReverseMap.set(serializeTypeNode(t), occur[t.id]);
-        for (const [id, val] of typeSet)
-          if (val === occur[t.id])
-            worklist.push(id);
+        modifyTypeNode(occur[t.id], t);
         return occur[t.id];
       }
     } else if (t.kind === "union") {
-      const newTypes = t.types.map(ty => helper(typeNodes.get(ty)!));
-      t.types = newTypes;
+      t.types = t.types.map(ty => helper(typeNodes.get(ty)!));
     } else if (t.kind === "object") {
       // console.log(`enter ${t.name}`)
       if (occur[t.id]) {
@@ -365,25 +372,11 @@ function newTypeNode(ty: TypeNode): number{
       occur[t.id] = UNKNOWN;
 
       for (const key in t.properties) {
-        const ret = helper(typeNodes.get(t.properties[key])!);
-        if (t.properties[key] !== ret) {
-          t.properties[key] = ret;
-        }
+        t.properties[key] = helper(typeNodes.get(t.properties[key])!);
       }
 
       if (occur[t.id] !== UNKNOWN && serializeTypeNode(typeNodes.get(occur[t.id])!) !== serializeTypeNode(t)) {
-        // 修改TypeNode，危险操作，传播影响
-        if (LOG_TYPENODE) {
-          console.log(`Change type node ${occur[t.id]} from ${JSON.stringify(typeNodes.get(occur[t.id])!) } to ${JSON.stringify(t)}`);
-        }
-        typeNodes.set(occur[t.id], t);
-        typeNodeReverseMap.set(serializeTypeNode(t), occur[t.id]);
-        const affected = typeNodeUsers.get(occur[t.id]);
-        if (affected) {
-          for (const id of affected) {
-            worklist.push(id);
-          }
-        }
+        modifyTypeNode(occur[t.id], t);
         return occur[t.id];
       }
       // console.log(`exit ${t.name}`)
@@ -392,24 +385,13 @@ function newTypeNode(ty: TypeNode): number{
     serialized = serializeTypeNode(t);
     if (typeNodeReverseMap.has(serialized)) {
       const id = typeNodeReverseMap.get(serialized)!;
-      if (LOG_TYPENODE) {
-        console.log(`find in typenode reverse map: ${id} : ${serialized}`);
-      }
       return id;
-    } else {
-      const id = typeVarCounter++;
-      typeNodes.set(id, t);
-      typeNodeReverseMap.set(serialized, id);
-      if (LOG_TYPENODE) {
-        console.log(`New type node created: ${id} : ${serialized}`);
-      }
-      return id;
-    }
+    } else return allocateTypeNode(t);
   }
 }
 
 function mergeTypes(tys: number[]) : number {
-  let tyList : number[] = [], ret : number, has_unknown = false; 
+  let tyList : number[] = [], ret : number, has_unknown = false, arrList = []; 
   const tmp = tys.map(ty => { const typeNode = typeNodes.get(ty); return typeNode?.kind === "union" ? [...typeNode.types] : [ty] }).flat();
   const set = new Set(tmp.filter(ty => ty !== UNKNOWN));
   if (tmp.includes(UNKNOWN)) {
@@ -421,9 +403,14 @@ function mergeTypes(tys: number[]) : number {
     const typeNode = typeNodes.get(ty);
     let cand = ty;
     if (typeNode?.kind === "literal" && (set.size > 1 || has_unknown)) cand = typeof typeNode.value === "number" ? NUMBER : typeof typeNode.value === "string" ? STRING : BOOLEAN;
+    if (typeNode?.kind === "array") {
+      arrList.push(cand);
+      continue;
+    }
     tyList.push(cand);
   }
-  tyList = [...new Set(tyList)]; // 去重
+  if (arrList.length > 1) arrList = [newTypeNode( { kind: "array", elementType: ANY})];
+  tyList = [...new Set(tyList), ...arrList]; // 去重
 
   if (tyList.length === 1) {
     ret = tyList[0];
@@ -1302,7 +1289,7 @@ function secondPass(filePath: string, node: AstNode) {
         // 清楚引号
         const idNode = node.children[0].kind === "StringLiteral" ? node.children[0].text?.slice(1, -1) : node.children[0].text;
         if (!idNode) return;
-        syntaxNodes[node.children[2].varId!].text = idNode;
+        syntaxNodes[node.children[2].varId!].text = idNode; 
         syntaxNodes[node.children[2].varId!].v8kind = undefined;
         const obj = node.parent?.parent;
         if (!obj || !obj.varId) return;
@@ -1533,14 +1520,14 @@ function secondPass(filePath: string, node: AstNode) {
           allConstraints.push(["hasType", node.varId!, UNDEFINED, `${node.text!} ∈ undefined`]);
           return;
         }
-        let typeId = paramBindings.get(node.text);
+        const typeId = paramBindings.get(node.text) ?? varBindings.get(node.text);
 
         if (typeId !== undefined) {
-          allConstraints.push(["sameID", node.varId!, typeId, `same identifier: ${node.text!}`]);
-        }
-        else {
-          typeId = varBindings.get(node.text);
-          if (typeId !== undefined) {
+          if (node.parent?.kind === "PropertyAssignment" && node.parent?.children?.[2] === node) {
+            // 属性赋值时不添加sameID约束
+            allConstraints.push(["sameType", node.varId!, typeId, `same identifier: ${node.text!}`]);
+            allConstraints.push(["sameType", typeId, node.varId!, `same identifier: ${node.text!}`]);
+          } else {
             allConstraints.push(["sameID", node.varId!, typeId, `same identifier: ${node.text!}`]);
           }
         }
