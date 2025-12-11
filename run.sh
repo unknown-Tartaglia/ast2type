@@ -30,7 +30,7 @@ for input in $(find "$dir" -name "*.js"); do
     # 执行核心命令
     ../fresh_aot/out/x64.debug/d8 ${input} \
         --annotated-type ${anno_file} \
-        --use-pbc \
+        --use-pbc --log-pbc \
         2>3 | tee 2 | python findAnnoInfo.py "${anno_file}" >>1
 
     # 捕获退出状态
