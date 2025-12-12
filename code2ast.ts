@@ -471,7 +471,7 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
   return serialized;
 }
 
-function writeJsonStream(file: string, obj: any) {
+export function writeJsonStream(file: string, obj: any) {
   const out = fs.createWriteStream(file, { flags: "w" });
   const indent = "  "; // 2 spaces
   let level = 0;
@@ -496,7 +496,7 @@ function writeJsonStream(file: string, obj: any) {
       out.write("]");
     } else if (typeof value === "object") {
       out.write("{");
-      const keys = Object.keys(value);
+      const keys = Object.keys(value).filter(k => value[k] !== undefined);
       level++;
       keys.forEach((k, i) => {
         newline();
