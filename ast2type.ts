@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { Command } from "commander";
+import { writeJsonStream } from "./code2ast"
 
 // 命令行参数解析
 const program = new Command();
@@ -14,14 +15,17 @@ const inputDir = path.resolve(options.input);
 const outputDir = options.output ? path.resolve(options.output) : path.resolve("./output");
 
 const LOG_SCOPE = false; // 是否开启日志作用域
-const LOG_TYPENODE = true; // 是否开启类型节点日志
+const LOG_TYPENODE = false; // 是否开启类型节点日志
 const LOG_TYPENODE_VERBOSE = false; // 是否开启类型节点详细日志
 const LOG_IDENTIFIER_NODE = false; // 是否开启标识符节点日志
 const LOG_IMPORT = false; // 是否开启导入日志
-const LOG_TYPE_FLOW = true; // 是否开启类型流日志
+const LOG_TYPE_FLOW = false; // 是否开启类型流日志
 const LOG_EVALUATE_STCS = false; // 是否评估groundtruth标注对比数据
 const LOG_TYPE_STCS = false; // 是否开启类型统计
 const LOG_OPERATOR_STCS = true; // 是否开启操作符统计（==, ===, !=, !==, !, typeof)
+const IGNORE_WARNINGS = true; // 忽略警告
+const IGNORE_ERRORS = false; // 忽略错误
+const IGNORE_LOGS = false; // 忽略日志
 
 const DEDUCE_ONLY_WHEN_ALL_KNOWNN = false; // 仅在所有分支类型已知时进行类型推断
 
@@ -113,6 +117,14 @@ function getTimeElapsed(): string {
 
 for (const m of console_methods) {
   const original = console[m];
+  let ignores : string[] = [];
+  if (IGNORE_ERRORS) ignores = ignores.concat(["error"]);
+  if (IGNORE_WARNINGS) ignores = ignores.concat(["warn"]);
+  if (IGNORE_LOGS) ignores = ignores.concat(["log"]);
+  if (ignores.includes(m)) {
+    console[m] = (...args: any[]) => {};
+    continue;
+  }
 
   console[m] = (...args: any[]) => {
     original(getTimeElapsed(), ...args);
@@ -2324,21 +2336,17 @@ function emitGlobalTypeGraphAndConstraints() {
 
   // 写出 constraints 和推理类型
   const constraintOut = path.join(outDir, "constraints.json");
-  fs.writeFileSync(
-    constraintOut,
-    JSON.stringify({ allConstraints, types }, null, 2),
-    "utf8"
-  );
+  writeJsonStream(constraintOut, { allConstraints, types });
 
   // 写出类型图（仅 JSON）
   const jsonGraph = generateTypeGraphJson();
   const jsonOut = path.join(outDir, "typegraph.json");
-  fs.writeFileSync(jsonOut, JSON.stringify(jsonGraph, null, 2), "utf8");
+  writeJsonStream(jsonOut, jsonGraph);
 
   // 写出类型标注结果
   const json = generateTypeAnno();
   const outfile = path.join(outputDir, "typeinfo.json");
-  fs.writeFileSync(outfile, JSON.stringify(json, null, 2), "utf8");
+  writeJsonStream(outfile, json);
 
   // 按 file 分组
   const groups : Record<string, any> = {};
@@ -2351,7 +2359,7 @@ function emitGlobalTypeGraphAndConstraints() {
   for (const file in groups) {
     const outfile = path.join(path.join(outputDir, "typeinfo"), file + ".json");
     fs.mkdirSync(path.dirname(outfile), { recursive: true }); // 创建目录
-    fs.writeFileSync(outfile, JSON.stringify(groups[file], null, 2), "utf8");
+    writeJsonStream(outfile, groups[file]);
   }
 
   console.log(`Done. Output written to ${outDir}`);
