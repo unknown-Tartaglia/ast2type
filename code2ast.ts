@@ -599,4 +599,6 @@ function main() {
   console.log(`AST generation completed in ${(end - start) / 1000} seconds.`);
 }
 
-main();
+if (require.main === module) {
+  main();
+}
