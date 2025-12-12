@@ -345,7 +345,6 @@ function newTypeNode(ty: TypeNode): number{
     const id = typeNodeReverseMap.get(serialized);
     return id!;
   }
-  console.log(`allocating new type node: ${JSON.stringify(ty)} ~~~ ${serializeTypeNode(ty)}`);
 
   // 处理对象类型的循环引用
   const occur: Record<string, number> = Object.create(null);
