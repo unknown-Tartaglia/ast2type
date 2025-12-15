@@ -1056,7 +1056,7 @@ function secondPass(filePath: string, node: AstNode) {
     // 处理export xxx from xxx
     ExportDeclaration(node) {
       const raw = node.children?.find(n => n.kind === "StringLiteral")?.text;
-      const moduleSpecifier = raw?.replace(/^['"]|['"]$/, ""); // 去掉引号
+      const moduleSpecifier = raw?.replace(/^['"]|['"]$/g, ""); // 去掉引号
       if (!moduleSpecifier) {
         if (LOG_IMPORT)
           console.warn(`ImportDeclaration in ${filePath} has no moduleSpecifier`);
@@ -1122,11 +1122,11 @@ function secondPass(filePath: string, node: AstNode) {
 
   const handlers: Record<string, (node: AstNode) => void> = {
     StringLiteral(node) {
-      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: node.text ?? "unknown text"}), `${node.text!} ∈ string`]);
+      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: node.text?.replace(/^['"`]|['"`]$/g, "") ?? "unknown text"}), `${node.text!} ∈ string`]);
       syntaxNodes[node.varId!].v8kind = "Literal"
     },
     NoSubstitutionTemplateLiteral(node) {
-      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: node.text ?? "unknown text"}), `${node.text!} ∈ string`]);
+      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: node.text?.replace(/^['"`]|['"`]$/g, "") ?? "unknown text"}), `${node.text!} ∈ string`]);
     },
     FirstLiteralToken(node) {
       // 暂时默认为数字
@@ -2419,6 +2419,7 @@ function emitGlobalTypeGraphAndConstraints() {
       const id = Number(idstr)
       const node = syntaxNodes[id];
       const t = printJsonType(typeSet.get(id) ?? UNKNOWN);
+      const ty = typeNodes.get(typeSet.get(id) ?? UNKNOWN);
       if (t === "unknown" || !node.v8kind || node.v8kind === "invisible") continue;
       outJson.push({
         context: node.context,
@@ -2428,6 +2429,7 @@ function emitGlobalTypeGraphAndConstraints() {
         location: node.offset,
         pos: node.position,
         type: t,
+        constant: ty?.kind === "literal" ? ty.value : undefined,
         relapath: node.file!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, ""),
         file: path.join(node.file!.split("ast" + require("path").sep)[0].replace("_output", ""), node.file!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")),
       })
