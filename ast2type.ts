@@ -1447,8 +1447,9 @@ function secondPass(filePath: string, node: AstNode) {
         }
         // instance of
         else if (operator.kind === "InstanceOfKeyword") { 
+          syntaxNodes[node.varId!].v8kind ??= "BinaryOperation";
           let parent = node.parent;
-          while (parent && node.parent?.kind !== "FunctionDeclaration") parent = parent.parent;
+          while (parent && parent?.kind !== "FunctionDeclaration") parent = parent.parent;
           // trick
           if (parent && parent.kind === "FunctionDeclaration" && parent.children?.[1].text === "_classCallCheck") {
             allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: true}), `${node.text!} ∈ true`]);
