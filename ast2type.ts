@@ -2430,7 +2430,7 @@ function emitGlobalTypeGraphAndConstraints() {
       const node = syntaxNodes[id];
       const t = printJsonType(typeSet.get(id) ?? UNKNOWN);
       const ty = typeNodes.get(typeSet.get(id) ?? UNKNOWN);
-      if (t === "unknown" || !node.v8kind || node.v8kind === "invisible") continue;
+      if (t === "unknown" || !node.v8kind || node.v8kind === "invisible" || node.offset === -1) continue;
       outJson.push({
         context: node.context,
         exprText: node.text,
