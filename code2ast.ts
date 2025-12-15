@@ -1,9 +1,8 @@
 import * as fs from "fs";
 import * as path from "path";
-import { Project, SyntaxKind, Node, OutputFile } from "ts-morph";
+import { Project, SyntaxKind, Node, OutputFile, NamedExports } from "ts-morph";
 import { Command } from "commander";
 import JSON5 from "json5";
-import { findNodeHandle } from "react-native";
 
 const program = new Command();
 program
@@ -124,6 +123,16 @@ function getLineAndColumn(pos: number, lineStarts: number[]) {
   };
 }
 
+function getDeepChild(node: Node | undefined, ...indices: number[]): Node | undefined {
+  let current: Node | undefined = node;
+  for (const i of indices) {
+    const children : any = current?.getChildren();
+    if (!children || i < 0 || i >= children.length) return undefined;
+    current = children[i];
+  }
+  return current;
+}
+
 // 构造import id from filePath的AST节点
 function constructImportAST(id: string, filePath: string): any {
   return {
@@ -210,7 +219,9 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
         _dependencyMap.push(arg.getText().replace(/['"]/g, ""));
       }
     }
-  } else if (node.getKind() === SyntaxKind.CallExpression && node.getChildAtIndex(0).getKind() === SyntaxKind.Identifier && node.getChildAtIndex(0).getText() === "_$$_REQUIRE") {
+  }
+  // 处理_$$_REQUIRE
+  else if (node.getKind() === SyntaxKind.CallExpression && node.getChildAtIndex(0).getKind() === SyntaxKind.Identifier && node.getChildAtIndex(0).getText() === "_$$_REQUIRE") {
     const idx = node.getChildAtIndex(2).getChildAtIndex(0).getChildAtIndex(2);
     if (idx && idx.getKind() === SyntaxKind.FirstLiteralToken) {
       const index = parseInt(idx.getText(), 10);
@@ -254,6 +265,166 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
       }
     } else {
       console.warn(`Cannot parse dependency index in ${node.getText()}`);
+    }
+  }
+  // 处理_defineProperty
+  else if (node.getKind() === SyntaxKind.CallExpression && node.getChildAtIndex(0).getKind() === SyntaxKind.Identifier && node.getChildAtIndex(0).getText() === "_defineProperty") {
+    const targetNode = serializeNode(node.getChildAtIndex(2).getChildAtIndex(0), isSDK, kitImports);
+    const propNameNode = node.getChildAtIndex(2).getChildAtIndex(2);
+    let propName: string;
+    if (propNameNode.getKind() === SyntaxKind.StringLiteral || propNameNode.getKind() === SyntaxKind.NumericLiteral) {
+      propName = propNameNode.getText().replace(/['"]/g, "");
+    } else {
+      propName = propNameNode.getText();
+    }
+    const valueNode = serializeNode(node.getChildAtIndex(2).getChildAtIndex(4), isSDK, kitImports);
+    return {
+      "kind": "BinaryExpression",
+      "offset": -1,
+      "children": [
+        {
+          "kind": "PropertyAccessExpression",
+          "offset": -1,
+          "children": [
+            {
+              ...targetNode
+            },
+            {
+              "kind": "DotToken",
+              "offset": -1,
+              "text": ".",
+              position
+            },
+            {
+              "kind": "Identifier",
+              "offset": -1,
+              "text": propName,
+              position
+            }
+          ],
+          text: `${targetNode.text}.${propName}`,
+          position
+        },
+        {
+          "kind": "FirstAssignment",
+          "offset": -1,
+          "text": "=",
+          position
+        },
+        {
+          ...valueNode
+        }
+      ],
+      text: `${targetNode.text}.${propName} = ${valueNode.text}`,
+      position
+    }
+  }
+  // var x = function() {}() 形式的立即执行函数
+  else if (node.getKind() === SyntaxKind.VariableDeclarationList && getDeepChild(node, 1, 0)?.getKind() === SyntaxKind.VariableDeclaration 
+  && getDeepChild(node, 1, 0, 2)?.getKind() === SyntaxKind.CallExpression) {
+    // 处理es5类型定义
+    const nameNode = getDeepChild(node, 1, 0, 0);
+    const funcExpr = getDeepChild(node, 1, 0, 2, 0);
+    const funcBodyExprs = getDeepChild(funcExpr, 4, 1);
+    let consturctor, properties = [];
+    if (nameNode && funcBodyExprs) {
+      for (const expr of funcBodyExprs.getChildren()) {
+        if (expr.getKind() === SyntaxKind.FunctionDeclaration && getDeepChild(expr, 1)?.getText() === nameNode.getText()) {
+          consturctor = serializeNode(expr, isSDK, kitImports);
+          consturctor.kind = "Constructor";
+          consturctor.children[0].kind = "ConstructorKeyword";
+          consturctor.children[0].text = "constructor";
+          consturctor.children[5].children[1].children = consturctor.children[5].children[1].children.filter((n : any) => n.kind !== "ExpressionStatement" || n.children[0]?.kind !== "CallExpression" || n.children[0]?.children[0]?.text !== "_classCallCheck");
+          consturctor.children.splice(1, 1); // remove name
+        } else if (expr.getKind() === SyntaxKind.ReturnStatement && getDeepChild(expr, 1)?.getKind() === SyntaxKind.CallExpression && getDeepChild(expr, 1, 0)?.getText() === "_createClass" && getDeepChild(expr, 1, 2, 0)?.getText() === nameNode.getText()) {
+          const classArgs = getDeepChild(expr, 1, 2, 2, 1);
+          if (classArgs) {
+            // _createClass的第二个和第三个参数
+            for (const classArg of classArgs.getChildren().concat(getDeepChild(expr, 1, 2, 4, 1)?.getChildren() || []))
+              if (classArg.getKind() === SyntaxKind.ObjectLiteralExpression) {
+                const propName= getDeepChild(classArg, 1, 0, 2)?.getText()?.replace(/['"]/g, "");
+                let kind = getDeepChild(classArg, 1, 2, 0)?.getText();
+                let ValueNode = getDeepChild(classArg, 1, 2, 2);
+                let prop;
+                if (ValueNode?.getKind() === SyntaxKind.FunctionExpression) {
+                  prop = serializeNode(ValueNode, isSDK, kitImports);
+                  if (kind === "get") {
+                    prop.kind = "GetAccessor";
+                    prop.children[0].kind = "GetKeyword";
+                    prop.children[0].text = "get";
+                    prop.children[1].text = propName;
+                  } else if (kind === "set") {
+                    prop.kind = "SetAccessor";
+                    prop.children[0].kind = "SetKeyword";
+                    prop.children[0].text = "set";
+                    prop.children[1].text = propName;
+                  } else {
+                    prop.kind = "MethodDeclaration";
+                    prop.children.splice(0, 0);
+                  }
+                  properties.push(prop);
+                }
+                kind = getDeepChild(classArg, 1, 4, 0)?.getText();
+                ValueNode = getDeepChild(classArg, 1, 4, 2);
+                if (ValueNode?.getKind() === SyntaxKind.FunctionExpression) {
+                  prop = serializeNode(ValueNode, isSDK, kitImports);
+                  if (kind === "get") {
+                    prop.kind = "GetAccessor";
+                    prop.children[0].kind = "GetKeyword";
+                    prop.children[0].text = "get";
+                    prop.children[1].text = propName;
+                  } else if (kind === "set") {
+                    prop.kind = "SetAccessor";
+                    prop.children[0].kind = "SetKeyword";
+                    prop.children[0].text = "set";
+                    prop.children[1].text = propName;
+                  } else {
+                    prop.kind = "MethodDeclaration";
+                    prop.children.splice(0, 0);
+                  }
+                  properties.push(prop);
+                }
+              }
+          }
+        } 
+      }
+      return {
+        "kind": "ClassDeclaration",
+        "offset": -1,
+        "children": [
+          {
+            "kind": "ClassKeyword",
+            "offset": -1,
+            "text": "class",
+            position
+          },
+          {
+            "kind": "Identifier",
+            "offset": serializeNode(nameNode, isSDK, kitImports).offset,
+            "text": nameNode.getText(),
+            "position": serializeNode(nameNode, isSDK, kitImports).position
+          },
+          {
+            "kind": "FirstPunctuation",
+            "offset": -1,
+            "text": "{",
+            position
+          },
+          {
+            kind: "SyntaxList",
+            offset: -1,
+            children: [consturctor, ...properties],
+            position
+          },
+          { 
+            "kind": "LastPunctuation",
+            "offset": -1,
+            "text": "}",
+            position
+          }
+        ],
+        position
+      }
     }
   }
 
