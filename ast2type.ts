@@ -1445,6 +1445,15 @@ function secondPass(filePath: string, node: AstNode) {
           }
           allConstraints.push(["hasType", node.varId!, NUMBER, `${left.text} ${operator.text} ${right.text}`]);
         }
+        // instance of
+        else if (operator.kind === "InstanceOfKeyword") { 
+          let parent = node.parent;
+          while (parent && node.parent?.kind !== "FunctionDeclaration") parent = parent.parent;
+          // trick
+          if (parent && parent.kind === "FunctionDeclaration" && parent.children?.[1].text === "_classCallCheck") {
+            allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: true}), `${node.text!} ∈ true`]);
+          } else allConstraints.push(["hasType", node.varId!, BOOLEAN, `${node.text!} ∈ boolean`]);
+        }
         // TODO: 更多二元运算
       }
     },
