@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { Command } from "commander";
 import { writeJsonStream } from "./code2ast"
+import { unzip } from "zlib";
 
 // 命令行参数解析
 const program = new Command();
@@ -465,11 +466,6 @@ function firstPass(filePath: string, ast: AstNode) {
   function walk(node: AstNode) {
     node.varId = getTypeVarId(node);
     // 提前函数声明
-    node.children?.sort((a, b) => {
-      const aFunc = a.kind === "FunctionDeclaration";
-      const bFunc = b.kind === "FunctionDeclaration";
-      return (aFunc === bFunc) ? 0 : aFunc ? -1 : 1;
-    });
     for (const child of node.children || []) {
       child.parent = node;
       walk(child);
@@ -585,6 +581,8 @@ function secondPass(filePath: string, node: AstNode) {
   let scopeStack: Map<string, number>[] = [];
   let varBindings = new Map<string, number>();
   let paramBindings = new Map<string, number>();
+  let unprocsdScopes: Map<string, Set<number>>[] = [];
+  let unprocsdVars = new Map<string, Set<number>>();
 
   const preOrderHandlers: Record<string, (node: AstNode) => void> = {
     // 处理匿名对象
@@ -1550,7 +1548,15 @@ function secondPass(filePath: string, node: AstNode) {
             allConstraints.push(["sameType", typeId, node.varId!, `same identifier: ${node.text!}`]);
           } else {
             allConstraints.push(["sameID", node.varId!, typeId, `same identifier: ${node.text!}`]);
+            if (typeId === node.varId) {
+              const makeup = unprocsdVars.get(node.text);
+              for (const mu of makeup || []) {
+                allConstraints.push(["sameID", mu, node.varId!, `same identifier by makeup: ${node.text!}`]);
+              }
+            }
           }
+        } else {
+          unprocsdVars.set(node.text, (unprocsdVars.get(node.text) || new Set()).add(node.varId!));
         }
       }
     },
@@ -1623,6 +1629,7 @@ function secondPass(filePath: string, node: AstNode) {
       syntaxNodes[node.varId!].v8kind = "FunctionLiteral";
       if (!node.children?.some(n => n.kind === "Block")) {
         const previous = scopeStack.pop();
+        unprocsdScopes.pop();
         if (previous) {
           if (LOG_SCOPE) {
             console.log(`Exiting scope for ArrowFunction at line ${node.position?.start?.line}, column ${node.position?.start?.character} in ${filePath}`);
@@ -1669,6 +1676,8 @@ function secondPass(filePath: string, node: AstNode) {
           console.log(`Creating scope for ArrowFunction at line ${node.position?.start?.line}, column ${node.position?.start?.character} in ${filePath}`);
         scopeStack.push(varBindings);
         varBindings = new Map(varBindings);
+        unprocsdScopes.push(unprocsdVars);
+        unprocsdVars = new Map();
         // 加入parameter绑定
         for (const [name, id] of paramBindings.entries()) {
           varBindings.set(name, id);
@@ -1692,6 +1701,8 @@ function secondPass(filePath: string, node: AstNode) {
     FirstPunctuation(node) {
       scopeStack.push(varBindings);
       varBindings = new Map(varBindings);
+      unprocsdScopes.push(unprocsdVars);
+      unprocsdVars = new Map();
       // 加入parameter绑定
       for (const [name, id] of paramBindings.entries()) {
         varBindings.set(name, id);
@@ -1705,6 +1716,7 @@ function secondPass(filePath: string, node: AstNode) {
     CloseBraceToken(node) {
       // 恢复旧的变量绑定
       const previous = scopeStack.pop();
+      unprocsdScopes.pop();
       if (previous) {
         if (LOG_SCOPE) {
           console.log(`Exiting scope at line ${node.position?.start?.line}, column ${node.position?.start?.character} in ${filePath}:`);
