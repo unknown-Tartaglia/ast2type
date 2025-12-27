@@ -1877,6 +1877,21 @@ function deriveVariableTypes() {
         source.get(next)!.set(cur, tSet);
         setTypeVar(next, mergeBranches(next));
       }
+      else if (edgeKind === "makeArray") {
+        // 如果是数组类型，添加元素类型
+        if (nSet === undefined) {
+          console.warn(`makeArray on undefined type in edge ${cur}->${next}`);
+        } else {
+          const typeNode = typeNodes.get(nSet);
+          if (typeNode === undefined || typeNode.kind !== "array") {
+            console.warn(`makeArray on non-array type ${printType(nSet)} in edge ${cur}->${next}`);
+            continue;
+          }
+          source.get(next)!.set(cur, tSet);
+          const id = newTypeNode({ kind: "array", elementType: mergeBranches(next) });
+          setTypeVar(next, id);
+        }
+      }
       else if (edgeKind === "takeProperty") {
         // 如果是取属性，添加属性类型
         if (!syntaxNodes[next]?.text) {
@@ -1893,9 +1908,32 @@ function deriveVariableTypes() {
             source.get(next)?.set(cur, typeNode.members[propName]);
             if (LOG_TYPE_FLOW)
               console.log(`takeProperty[enum] ${typeNode.members[propName]} for ${propName} in edge ${cur}->${next}`);
+          } else if (typeNode && typeNode.kind == "union") {
+            let lst = [];
+            for (const subtype of typeNode.types) {
+              const subtypeNode = typeNodes.get(subtype);
+              if (propName && subtypeNode && subtypeNode.kind == "object" && propName in subtypeNode.properties) {
+                lst.push(subtypeNode.properties[propName]);
+                if (LOG_TYPE_FLOW)
+                  console.log(`takeProperty[union-object] ${subtypeNode.properties[propName]} for ${propName} in edge ${cur}->${next}`);
+              } else if (propName && subtypeNode && subtypeNode.kind == "enum" && propName in subtypeNode.members) {
+                lst.push(subtypeNode.members[propName]);
+                if (LOG_TYPE_FLOW)
+                  console.log(`takeProperty[union-enum] ${subtypeNode.members[propName]} for ${propName} in edge ${cur}->${next}`);
+              } else {
+                lst.push(UNDEFINED);
+              }
+            }
+            if (lst.length > 0) {
+              source.get(next)!.set(cur, mergeTypes(lst));
+            } else {
+              console.warn(`Unexpected takeProperty when type ${tSet} : ${printType(tSet)} has no object or enum subtype with property ${propName} in edge ${cur}->${next}`);
+            }
+          } else {
+            source.get(next)!.set(cur, UNDEFINED);
           }
         }
-        setTypeVar(next, mergeBranches(next) === UNKNOWN ? typeSet.get(next)! : mergeBranches(next));
+        setTypeVar(next, mergeBranches(next));
       }
       else if (edgeKind === "elementAccess") {
         // 取数组成员
@@ -2007,20 +2045,6 @@ function deriveVariableTypes() {
         source.get(param)!.set(arg, UNKNOWN);
         worklist.push(arg);
         continue;
-      }
-      else if (edgeKind === "makeArray") {
-        // 如果是数组类型，添加元素类型
-        if (nSet === undefined) {
-          console.warn(`makeArray on undefined type in edge ${cur}->${next}`);
-        } else {
-          const typeNode = typeNodes.get(nSet);
-          if (typeNode === undefined || typeNode.kind !== "array") {
-            console.warn(`makeArray on non-array type ${printType(nSet)} in edge ${cur}->${next}`);
-            continue;
-          }
-          const id = newTypeNode({ kind: "array", elementType: mergeTypes([typeNode.elementType, tSet]) });
-          setTypeVar(next, id);
-        }
       }
       else if (edgeKind === "initProperty") {
         // 如果是设置属性，添加属性类型
