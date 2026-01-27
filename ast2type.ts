@@ -2,7 +2,13 @@ import * as fs from "fs";
 import * as path from "path";
 import { Command } from "commander";
 import { writeJsonStream } from "./code2ast"
-import { unzip } from "zlib";
+import { FactStore, Emitter } from "./ast2type/fact"
+import { MetaStore } from "./ast2type/meta"
+import { Solver } from "./ast2type/solver";
+import { tNodeStore } from "./ast2type/nType";
+import { DeterminantStrategy } from "./ast2type/strategy";
+import { RegularExpressionLiteral } from "ts-morph";
+import { Rule, RuleStore } from "./ast2type/rule";
 
 // 命令行参数解析
 const program = new Command();
@@ -16,11 +22,11 @@ const inputDir = path.resolve(options.input);
 const outputDir = options.output ? path.resolve(options.output) : path.resolve("./output");
 
 const LOG_SCOPE = false; // 是否开启日志作用域
-const LOG_TYPENODE = false; // 是否开启类型节点日志
-const LOG_TYPENODE_VERBOSE = false; // 是否开启类型节点详细日志
+export const LOG_TYPENODE = false; // 是否开启类型节点日志
+export const LOG_TYPENODE_VERBOSE = false; // 是否开启类型节点详细日志
 const LOG_IDENTIFIER_NODE = false; // 是否开启标识符节点日志
 const LOG_IMPORT = false; // 是否开启导入日志
-const LOG_TYPE_FLOW = false; // 是否开启类型流日志
+export const LOG_TYPE_FLOW = false; // 是否开启类型流日志
 const LOG_EVALUATE_STCS = false; // 是否评估groundtruth标注对比数据
 const LOG_TYPE_STCS = false; // 是否开启类型统计
 const LOG_OPERATOR_STCS = true; // 是否开启操作符统计（==, ===, !=, !==, !, typeof)
@@ -28,7 +34,7 @@ const IGNORE_WARNINGS = true; // 忽略警告
 const IGNORE_ERRORS = false; // 忽略错误
 const IGNORE_LOGS = false; // 忽略日志
 
-const DEDUCE_ONLY_WHEN_ALL_KNOWNN = false; // 仅在所有分支类型已知时进行类型推断
+export const DEDUCE_ONLY_WHEN_ALL_KNOWNN = false; // 仅在所有分支类型已知时进行类型推断
 
 // 常量类型
 const NUMBER = 1;
@@ -70,7 +76,7 @@ interface AstNode {
   children?: AstNode[];
   varId?: number;
   position?: { start: { line: number; character: number }; end: { line: number; character: number } };
-  offset?: number;
+  offset: number;
 }
 
 // 全局结构
@@ -79,7 +85,7 @@ const cnt: Record<number, number> = {};
 const fileToAst: Record<string, AstNode> = {};
 const globalExportMap: Record<string, Record<string, number>> = {};
 const globalExportFa: Record<string, Record<string, string[]>> = {};
-const syntaxNodes: Record<number, { kind: string; text?: string; file?: string; position?: any; offset?: number; v8kind?:string; context?:string }> = {};
+// const syntaxNodes: Record<number, { kind: string; text?: string; file?: string; position?: any; offset?: number; v8kind?:string; context?:string }> = {};
 const typeNodes: Map<number, TypeNode> = new Map();
 const allConstraints: Array<[string, number, number, string]> = [];
 const globalVarBindings = new Map<string, number>();
@@ -338,7 +344,7 @@ function setTypeVar(vid : number, tid : number) {
   typeNodeUsers.set(tid, (typeNodeUsers.get(tid) ?? new Set()).add(vid));
 }
 
-function newTypeNode(ty: TypeNode): number{
+export function newTypeNode(ty: TypeNode): number{
   if (LOG_TYPENODE_VERBOSE)
     console.log(`allocating new type node: ${JSON.stringify(ty)} ~~~ ${serializeTypeNode(ty)}`);
   let serialized = serializeTypeNode(ty);
@@ -461,6 +467,14 @@ function makePurePropertiesCopy(
   return obj;
 }
 
+const meta = new MetaStore();
+const tNode = new tNodeStore();
+const rule = new RuleStore();
+const fact = new FactStore();
+const emit = new Emitter(fact);
+const dtmStrtgy = new DeterminantStrategy();
+const solver = new Solver(rule, dtmStrtgy);
+
 // 第一遍：标号并提取export
 function firstPass(filePath: string, ast: AstNode) {
   function walk(node: AstNode) {
@@ -475,7 +489,8 @@ function firstPass(filePath: string, ast: AstNode) {
     let realPath = path.basename(filePath).replace(/\^/g, "\\").replace(/\.ast\.json/g, "");
 
     // export Class Enum TypeAlias Interface
-    if ((node.kind === "ClassDeclaration" || node.kind === "InterfaceDeclaration" || node.kind === "EnumDeclaration" || node.kind === "TypeAliasDeclaration" || node.kind === "FunctionDeclaration") && findNodesByKind(node, "ExportKeyword").length > 0) {
+    const exportedKinds = ["ClassDeclaration", "InterfaceDeclaration", "EnumDeclaration", "TypeAliasDeclaration", "FunctionDeclaration"];
+    if (exportedKinds.includes(node.kind) && findNodesByKind(node, "ExportKeyword").length > 0) {
       const idNode = node.children?.find(n => n.kind === "Identifier");
       if (idNode && idNode.text) {
         globalExportMap[realPath] ??= {};
@@ -499,19 +514,19 @@ function firstPass(filePath: string, ast: AstNode) {
       const idNodes = stx.children?.filter(n => n.kind === "VariableDeclaration");
       if (!idNodes) return;
       if (idNodes.length > 0) {
-        globalExportMap[realPath] ??= {};
         for (const idNode of idNodes) 
           if (idNode.children && idNode.children.length > 0 && idNode.children[0].kind === "Identifier" && idNode.children[0].text){
             globalExportMap[realPath][idNode.children[0].text] = idNode.children[0].varId!;
             if (idNode.children.length === 3 && idNode.children[1].kind === "FirstAssignment")
-              allConstraints.push(["sameType", idNode.children[0].varId!, idNode.children[2].varId!, `${idNode.text}`])
+              emit.flow(idNode.children[2].varId!, idNode.children[0].varId!, idNode.text);
         }
         // 处理default
         if (dftkwd && idNodes.length === 1) {
           const idNode = idNodes[0];
           if (idNode.children && idNode.children.length > 0 && idNode.children[0].kind === "Identifier" && idNode.children[0].text) {
             globalExportMap[realPath][dftkwd.text!] = dftkwd.varId!;
-            allConstraints.push(["sameType", dftkwd.varId!, idNodes[0].varId!, "default keyword"]);
+            emit.flow(idNode.children[0].varId!, dftkwd.varId!, "default keyword");
+            // allConstraints.push(["sameType", dftkwd.varId!, idNodes[0].varId!, "default keyword"]);
           }
         }
       }
@@ -534,7 +549,7 @@ function firstPass(filePath: string, ast: AstNode) {
             for (const idNode of idNodes) {
               if (idNode.children && idNode.children.length === 3 && idNode.children[2].kind === "Identifier" && idNode.children[2].text) {
                 globalExportMap[realPath][idNode.children[2].text] = idNode.children[2].varId!;
-                allConstraints.push(["sameType", idNode.children[2].varId!, idNode.children[0].varId!, `${idNode.text}`]);
+                emit.flow(idNode.children[0].varId!, idNode.children[2].varId!, `${idNode.text}`);
               } else if (idNode.children && idNode.children.length === 1 && idNode.children[0].kind === "Identifier" && idNode.children[0].text) {
                 globalExportMap[realPath][idNode.children[0].text] = idNode.children[0].varId!;
               }
@@ -544,7 +559,8 @@ function firstPass(filePath: string, ast: AstNode) {
       if (dftkwd) {
         globalExportMap[realPath] ??= {};
         globalExportMap[realPath][dftkwd.text!] = dftkwd.varId!;
-        allConstraints.push(["sameType", dftkwd.varId!, idNode.varId!, "default keyword"]);
+        emit.flow(idNode.varId!, dftkwd.varId!, "default keyword");
+        // allConstraints.push(["sameType", dftkwd.varId!, idNode.varId!, "default keyword"]);
         // TODO: 判断是否只有一个default
       }
 
@@ -587,9 +603,11 @@ function secondPass(filePath: string, node: AstNode) {
   const preOrderHandlers: Record<string, (node: AstNode) => void> = {
     // 处理匿名对象
     ObjectLiteralExpression(node) {
-      syntaxNodes[node.varId!].v8kind = "ObjectLiteral"
-      const typeId = newTypeNode({ kind: "object", name: `anonymous${node.varId!}`, id: node.varId!, properties: Object.create(null) });
-      allConstraints.push(["hasType", node.varId!, typeId, `new object`]);
+      meta.v8Kind.set(node.varId!, "ObjectLiteral");  
+      // syntaxNodes[node.varId!].v8kind = "ObjectLiteral"
+      emit.allocObj(node.varId!);
+      // const typeId = newTypeNode({ kind: "object", name: `anonymous${node.varId!}`, id: node.varId!, properties: Object.create(null) });
+      // allConstraints.push(["hasType", node.varId!, typeId, `new object`]);
     },
     // 处理函数声明
     FunctionDeclaration(node) {
@@ -597,6 +615,8 @@ function secondPass(filePath: string, node: AstNode) {
         const idNode = node.children?.find(n => n.kind === "Identifier");
         if (idNode && idNode.varId !== undefined && idNode.text) {
           varBindings.set(idNode.text, idNode.varId!);
+          meta.funcName.set(node.varId!, idNode.text);
+          emit.allocFunction(node.varId!, idNode.varId);
         }
 
 
@@ -605,24 +625,28 @@ function secondPass(filePath: string, node: AstNode) {
         if (index !== undefined && index !== -1) {
           const typeNode = node.children?.[index + 1];
           if (typeNode && typeNode.varId) {
-            const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: UNKNOWN });
-            setTypeVar(idNode?.varId!, id);
-            allConstraints.push(["returnAnnotation", idNode?.varId!, typeNode.varId, `return type of function ${idNode?.text!}`]);
+            emit.returnAnnot(idNode!.varId!, typeNode.varId!);
+            // const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: UNKNOWN });
+            // setTypeVar(idNode?.varId!, id);
+            // allConstraints.push(["returnAnnotation", idNode?.varId!, typeNode.varId, `return type of function ${idNode?.text!}`]);
           }
         }
         else if (findNodesByKind(node, "ReturnStatement").length === 0) {
           // 如果没有返回类型注解并且没有Return语句
-          const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: VOID });
-          setTypeVar(idNode?.varId!, id);
+          emit.returnVoid(idNode!.varId!);
+          // const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: VOID });
+          // setTypeVar(idNode?.varId!, id);
         }
-        else {
-          const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: UNKNOWN });
-          setTypeVar(idNode?.varId!, id);
-        }
+        // else {
+        //   const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: UNKNOWN });
+        //   setTypeVar(idNode?.varId!, id);
+        // }
       }
     },
     FunctionExpression(node) {
-      syntaxNodes[node.varId!].v8kind = "FunctionLiteral";
+      meta.v8Kind.set(node.varId!, "FunctionLiteral");
+      // syntaxNodes[node.varId!].v8kind = "FunctionLiteral";
+      emit.allocFunction(node.varId!, node.varId!);
       if (node.children) {
         const idNode = node;
         const index = node.children?.findIndex(n => n.kind === "ColonToken");
@@ -630,20 +654,22 @@ function secondPass(filePath: string, node: AstNode) {
         if (index !== undefined && index !== -1) {
           const typeNode = node.children?.[index + 1];
           if (typeNode && typeNode.varId) {
-            const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: UNKNOWN });
-            setTypeVar(idNode?.varId!, id);
-            allConstraints.push(["returnAnnotation", idNode?.varId!, typeNode.varId, `return type of function ${idNode?.text!}`]);
+            emit.returnAnnot(idNode!.varId!, typeNode.varId!);
+            // const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: UNKNOWN });
+            // setTypeVar(idNode?.varId!, id);
+            // allConstraints.push(["returnAnnotation", idNode?.varId!, typeNode.varId, `return type of function ${idNode?.text!}`]);
           }
         }
         else if (findNodesByKind(node, "ReturnStatement").length === 0) {
           // 如果没有返回类型注解并且没有Return语句
-          const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: idNode?.varId!, params: [], returnType: VOID });
-          setTypeVar(idNode?.varId!, id);
+          emit.returnVoid(idNode!.varId!);
+          // const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: idNode?.varId!, params: [], returnType: VOID });
+          // setTypeVar(idNode?.varId!, id);
         }
-        else {
-          const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: idNode?.varId!, params: [], returnType: UNKNOWN });
-          setTypeVar(idNode?.varId!, id);
-        }
+        // else {
+        //   const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: idNode?.varId!, params: [], returnType: UNKNOWN });
+        //   setTypeVar(idNode?.varId!, id);
+        // }
       }
     },
     // 变量声明
@@ -666,16 +692,20 @@ function secondPass(filePath: string, node: AstNode) {
       if (colonTokenIndex && colonTokenIndex !== -1) {
         const typeNode = node.children?.[colonTokenIndex + 1];
         if (typeNode && typeNode.varId) {
-          allConstraints.push(["annotation", left.varId, typeNode.varId, `annotation ${left.text!} : ${typeNode.text!}`]);
+          emit.annot(left.varId!, typeNode.varId!);
+          // allConstraints.push(["annotation", left.varId, typeNode.varId, `annotation ${left.text!} : ${typeNode.text!}`]);
         }
       }
       // 处理赋值操作
       if (firstAssignmentIndex && firstAssignmentIndex !== -1) {
         const right = node.children?.[firstAssignmentIndex + 1];
-        syntaxNodes[node.varId!].v8kind = "Assignment";
-        syntaxNodes[node.varId!].offset = right?.offset;
+        meta.v8Kind.set(node.varId!, "Assignment");
+        meta.offset.set(node.varId!, right?.offset!);
+        // syntaxNodes[node.varId!].v8kind = "Assignment";
+        // syntaxNodes[node.varId!].offset = right?.offset;
         if (left.varId !== undefined && right?.varId !== undefined) {
-          allConstraints.push(["sameType", left.varId, right.varId, `${left.text!} = ${right.text!}`]);
+          emit.flow(right.varId!, left.varId!, `variable ${left.text!} = ${right.text!}`);
+          // allConstraints.push(["sameType", left.varId, right.varId, `${left.text!} = ${right.text!}`]);
         }
       }
     },
@@ -686,15 +716,18 @@ function secondPass(filePath: string, node: AstNode) {
       if (LOG_IDENTIFIER_NODE)
         console.log(`Variable ${left.text} has ID ${left.varId}`);
       varBindings.set(left.text!, left.varId);
-      allConstraints.push(["sameType", left.varId, right.varId, `${left.text!} = ${right.text!}`]);
+
+      emit.alias(right.varId!, left.varId!);
+      // allConstraints.push(["sameType", left.varId, right.varId, `${left.text!} = ${right.text!}`]);
 
       //处理namespace
       let paNode = node.parent?.parent?.parent;
       if (!paNode || paNode.varId === undefined || paNode.kind !== "ModuleDeclaration") return;
       paNode = paNode.children?.find(n => n.kind === "Identifier");
       if (!paNode) return;
-      allConstraints.push(["initProperty", paNode.varId!, left.varId!, `${paNode.text!}.${left.text!}`]);
-      allConstraints.push(["takeProperty", left.varId!, paNode.varId!, `${paNode.text!}.${left.text!}`]);
+      emit.prop(paNode.varId!, left.varId!);
+      // allConstraints.push(["initProperty", paNode.varId!, left.varId!, `${paNode.text!}.${left.text!}`]);
+      // allConstraints.push(["takeProperty", left.varId!, paNode.varId!, `${paNode.text!}.${left.text!}`]);
     },
     // 处理函数参数
     Parameter(node) {
@@ -702,14 +735,15 @@ function secondPass(filePath: string, node: AstNode) {
         const paramIdNode = node.children?.find(n => n.kind === "Identifier");
         if (!paramIdNode || !paramIdNode.varId) return;
         paramBindings.set(paramIdNode.text!, paramIdNode.varId!);
+        meta.paramName.set(paramIdNode.varId!, paramIdNode.text!);
 
         // 处理类型注解
         const colonIndex = node.children?.findIndex(n => n.kind === "ColonToken");
         if (colonIndex !== undefined && colonIndex !== -1) {
           const typeNode = node.children?.[colonIndex + 1];
           if (typeNode && typeNode.varId) {
-            allConstraints.push(["annotation", paramIdNode.varId!, typeNode.varId, `annotation ${paramIdNode.text!} : ${typeNode.text!}`]);
-            // return 
+            emit.annot(paramIdNode.varId!, typeNode.varId!);
+            // allConstraints.push(["annotation", paramIdNode.varId!, typeNode.varId, `annotation ${paramIdNode.text!} : ${typeNode.text!}`]);
           }
         }
         
@@ -718,19 +752,22 @@ function secondPass(filePath: string, node: AstNode) {
         if (equalIndex !== undefined && equalIndex !== -1) {
           const right = node.children?.[equalIndex + 1];
           if (right && right.varId) {
-            allConstraints.push(["sameType", paramIdNode.varId!, right.varId, `parameter ${paramIdNode.text!} = ${right.text!}`]);
-            // return 
+            emit.flow(right.varId!, paramIdNode.varId!, `parameter ${paramIdNode.text!} = ${right.text!}`);
+            // allConstraints.push(["sameType", paramIdNode.varId!, right.varId, `parameter ${paramIdNode.text!} = ${right.text!}`]);
           }
         }
 
         let funcIdNode = node.parent;
-        while (funcIdNode && funcIdNode.kind !== "FunctionDeclaration" && funcIdNode.kind !== "MethodDeclaration" && funcIdNode.kind !== "ArrowFunction" && funcIdNode.kind !== "Constructor" && funcIdNode.kind !== "FunctionExpression") funcIdNode = funcIdNode.parent;
-        funcIdNode = funcIdNode?.kind === "ArrowFunction" || funcIdNode?.kind === "FunctionExpression" ? funcIdNode : funcIdNode?.children?.find(n => n.kind === "Identifier" || n.kind === "ConstructorKeyword");
+        while (funcIdNode && !["FunctionDeclaration", "MethodDeclaration", "MethodSignature", "ArrowFunction", "Constructor", "FunctionExpression"].includes(funcIdNode.kind)) funcIdNode = funcIdNode.parent;
         if (!funcIdNode || !funcIdNode.varId) return;
 
-        allConstraints.push(["setParamType", funcIdNode.varId!, paramIdNode.varId!, `parameter ${paramIdNode.text!} in function ${funcIdNode.text!}`]);
-        if (!funcParam[funcIdNode.varId]) funcParam[funcIdNode.varId] = [];
-        funcParam[funcIdNode.varId].push(paramIdNode.varId);
+        const params = node.parent?.children?.filter(n => n.kind === "Parameter") || [];
+        const index = params.findIndex(p => p === node);
+        emit.param(funcIdNode.varId!, paramIdNode.varId!, index)
+
+        // allConstraints.push(["setParamType", funcIdNode.varId!, paramIdNode.varId!, `parameter ${paramIdNode.text!} in function ${funcIdNode.text!}`]);
+        // if (!funcParam[funcIdNode.varId]) funcParam[funcIdNode.varId] = [];
+        // funcParam[funcIdNode.varId].push(paramIdNode.varId);
       }
     },
     // 处理枚举声明
@@ -738,8 +775,10 @@ function secondPass(filePath: string, node: AstNode) {
       if (node.children && node.children.length >= 2) {
         const idNode = node.children?.filter(n => n.kind === "Identifier")[0];
         if (idNode && idNode.varId !== undefined) {
-          const typeId = newTypeNode({ kind: "enum", name: idNode.text!, members: {} });
-          setTypeVar(idNode.varId!, typeId);
+          meta.enumName.set(idNode.varId!, idNode.text!);
+          emit.allocEnum(idNode.varId!);
+          // const typeId = newTypeNode({ kind: "enum", name: idNode.text!, members: {} });
+          // setTypeVar(idNode.varId!, typeId);
           varBindings.set(idNode.text!, idNode.varId!);
         }
 
@@ -748,8 +787,9 @@ function secondPass(filePath: string, node: AstNode) {
         if (!paNode || paNode.varId === undefined || paNode.kind !== "ModuleDeclaration") return;
         paNode = paNode.children?.find(n => n.kind === "Identifier");
         if (!paNode) return;
-        allConstraints.push(["initProperty", paNode.varId!, idNode.varId!, `${paNode.text!}.${idNode.text!}`]);
-        allConstraints.push(["takeProperty", idNode.varId!, paNode.varId!, `${idNode.text!}.${paNode.text!}`]);
+        emit.prop(paNode.varId!, idNode.varId!);
+        // allConstraints.push(["initProperty", paNode.varId!, idNode.varId!, `${paNode.text!}.${idNode.text!}`]);
+        // allConstraints.push(["takeProperty", idNode.varId!, paNode.varId!, `${idNode.text!}.${paNode.text!}`]);
       }
     },
     // 处理枚举成员
@@ -760,23 +800,26 @@ function secondPass(filePath: string, node: AstNode) {
       if(!paNode || !paNode.varId || !idNode || !idNode || !nb?.text) return;
       varBindings.set(idNode.text!, idNode.varId!);
 
-      const oldTypeId = typeSet.get(paNode.varId!);
-      if (!oldTypeId) return;
-      const oldTypeNode = typeNodes.get(oldTypeId);
-      if (!oldTypeNode || oldTypeNode.kind !== "enum") return;
-      const newMembers = { ...oldTypeNode.members };
-      newMembers[idNode.text!] = newTypeNode({ kind: "primitive", name: nb.text});
+      emit.enumMember(paNode.varId!, idNode.varId!);
+      emit.flow(nb.varId!, idNode.varId!, `enum member ${idNode.text} = ${nb.text}`);
+      // const oldTypeId = typeSet.get(paNode.varId!);
+      // if (!oldTypeId) return;
+      // const oldTypeNode = typeNodes.get(oldTypeId);
+      // if (!oldTypeNode || oldTypeNode.kind !== "enum") return;
+      // const newMembers = { ...oldTypeNode.members };
+      // newMembers[idNode.text!] = newTypeNode({ kind: "primitive", name: nb.text});
 
-      const typeId = newTypeNode({ kind: "enum", name: idNode.text!, members: newMembers });
-      setTypeVar(paNode.varId!, typeId);
+      // const typeId = newTypeNode({ kind: "enum", name: idNode.text!, members: newMembers });
+      // setTypeVar(paNode.varId!, typeId);
     },
     // 处理接口声明
     InterfaceDeclaration(node) {
       if (node.children && node.children.length >= 2) {
         const idNode = node.children?.filter(n => n.kind === "Identifier")[0];
         if (idNode && idNode.varId !== undefined) {
-          const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
-          setTypeVar(idNode.varId!, typeId);
+          emit.allocInterface(idNode.varId!);
+          // const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
+          // setTypeVar(idNode.varId!, typeId);
           varBindings.set(idNode.text!, idNode.varId!);
         }
 
@@ -785,8 +828,9 @@ function secondPass(filePath: string, node: AstNode) {
         if (!paNode || paNode.varId === undefined || paNode.kind !== "ModuleDeclaration") return;
         paNode = paNode.children?.find(n => n.kind === "Identifier");
         if (!paNode) return;
-        allConstraints.push(["initProperty", paNode.varId!, idNode.varId!, `${paNode.text!}.${idNode.text!}`]);
-        allConstraints.push(["takeProperty", idNode.varId!, paNode.varId!, `${idNode.text!}.${paNode.text!}`]);
+        emit.prop(paNode.varId!, idNode.varId!);
+        // allConstraints.push(["initProperty", paNode.varId!, idNode.varId!, `${paNode.text!}.${idNode.text!}`]);
+        // allConstraints.push(["takeProperty", idNode.varId!, paNode.varId!, `${idNode.text!}.${paNode.text!}`]);
       }
     },
     // 处理接口property
@@ -807,13 +851,16 @@ function secondPass(filePath: string, node: AstNode) {
         if (index !== undefined && index !== -1) {
           const typeNode = node.children?.[index + 1];
           if (typeNode && typeNode.varId) {
-            allConstraints.push(["initProperty", idNode.varId!, propIdNode.varId!, `${idNode.text!}.${propIdNode.text!}`]);
-            allConstraints.push(["takeProperty", propIdNode.varId!, idNode.varId!, `${propIdNode.text!}.${idNode.text!}`]);
-            allConstraints.push(["annotation", propIdNode.varId, typeNode.varId, `annotation ${idNode.text!}.${propIdNode.text!} : ${typeNode.text!}`]);
+            emit.prop(idNode.varId!, propIdNode.varId!);
+            emit.annot(propIdNode.varId!, typeNode.varId!);
+            // allConstraints.push(["initProperty", idNode.varId!, propIdNode.varId!, `${idNode.text!}.${propIdNode.text!}`]);
+            // allConstraints.push(["takeProperty", propIdNode.varId!, idNode.varId!, `${propIdNode.text!}.${idNode.text!}`]);
+            // allConstraints.push(["annotation", propIdNode.varId, typeNode.varId, `annotation ${idNode.text!}.${propIdNode.text!} : ${typeNode.text!}`]);
           }
         } else {
-          allConstraints.push(["initProperty", idNode.varId!, propIdNode.varId!, `${idNode.text!}.${propIdNode.text!}`]);
-          allConstraints.push(["takeProperty", propIdNode.varId!, idNode.varId!, `${propIdNode.text!}.${idNode.text!}`]);
+          emit.prop(idNode.varId!, propIdNode.varId!);
+          // allConstraints.push(["initProperty", idNode.varId!, propIdNode.varId!, `${idNode.text!}.${propIdNode.text!}`]);
+          // allConstraints.push(["takeProperty", propIdNode.varId!, idNode.varId!, `${propIdNode.text!}.${idNode.text!}`]);
         }
       }
     },
@@ -830,22 +877,26 @@ function secondPass(filePath: string, node: AstNode) {
 
         varBindings.set(methodIdNode.text, methodIdNode.varId!);
 
-        let funcType: TypeNode = { kind: "function", name: methodIdNode?.text!, id: methodIdNode?.varId!, params: [], returnType: UNKNOWN };
+        // let funcType: TypeNode = { kind: "function", name: methodIdNode?.text!, id: methodIdNode?.varId!, params: [], returnType: UNKNOWN };
         const index = node.children?.findIndex(n => n.kind === "ColonToken");
         // 类型注解
         if (index !== undefined && index !== -1) {
           const typeNode = node.children?.[index + 1];
           if (typeNode && typeNode.varId) {
-            allConstraints.push(["returnAnnotation", methodIdNode.varId, typeNode.varId, `return type of method ${idNode.text!}`]);
+            emit.returnAnnot(methodIdNode.varId!, typeNode.varId!);
+            // allConstraints.push(["returnAnnotation", methodIdNode.varId, typeNode.varId, `return type of method ${idNode.text!}`]);
           }
         } else {
-          funcType.returnType = UNKNOWN;
+          // funcType.returnType = UNKNOWN;
         }
 
-        const typeId = newTypeNode(funcType);
-        setTypeVar(methodIdNode.varId!, typeId);
+        meta.funcName.set(node.varId!, methodIdNode.text!);
+        emit.allocFunction(node.varId!, methodIdNode.varId!);
+        emit.prop(idNode.varId!, methodIdNode.varId!);
+        // const typeId = newTypeNode(funcType);
+        // setTypeVar(methodIdNode.varId!, typeId);
 
-        allConstraints.push(["initProperty", idNode.varId, methodIdNode.varId, `${idNode.text}.${methodIdNode.text!}`]);
+        // allConstraints.push(["initProperty", idNode.varId, methodIdNode.varId, `${idNode.text}.${methodIdNode.text!}`]);
         // allConstraints.push(["takeProperty", methodIdNode.varId!, idNode.varId!, `${methodIdNode.text!}.${idNode.text!}`]);
       }
     },
@@ -854,10 +905,11 @@ function secondPass(filePath: string, node: AstNode) {
       if (node.children && node.children.length >= 2) {
         const idNode = node.children?.filter(n => n.kind === "Identifier")[0];
         if (idNode && idNode.varId) {
-          const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
-          if (LOG_IDENTIFIER_NODE)
-            console.log(`Class ${idNode.text} has type ID ${typeId}`);
-          setTypeVar(idNode.varId!, typeId);
+          // const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
+          // if (LOG_IDENTIFIER_NODE)
+          //   console.log(`Class ${idNode.text} has type ID ${typeId}`);
+          // setTypeVar(idNode.varId!, typeId);
+          emit.allocClass(idNode.varId!);
           varBindings.set(idNode.text!, idNode.varId!);
 
           // 添加this指向
@@ -878,8 +930,9 @@ function secondPass(filePath: string, node: AstNode) {
         const propIdNode = findNodesByKind(node, "Identifier")[0];
         if (!propIdNode || propIdNode.varId === undefined) return;
 
-        allConstraints.push(["initProperty", idNode.varId!, propIdNode.varId!, `${idNode.text!}.${propIdNode.text!}`]);
-        allConstraints.push(["takeProperty", propIdNode.varId!, idNode.varId!, `${propIdNode.text!}.${idNode.text!}`]);
+        emit.prop(idNode.varId, propIdNode.varId);
+        // allConstraints.push(["initProperty", idNode.varId!, propIdNode.varId!, `${idNode.text!}.${propIdNode.text!}`]);
+        // allConstraints.push(["takeProperty", propIdNode.varId!, idNode.varId!, `${propIdNode.text!}.${idNode.text!}`]);
         
 
         const colonNode = node.children.find(n => n.kind === "ColonToken");
@@ -892,7 +945,8 @@ function secondPass(filePath: string, node: AstNode) {
           if (index !== undefined && index !== -1) {
             const typeNode = colonNode!.parent!.children?.[index + 1];
             if (typeNode && typeNode.varId) {
-              allConstraints.push(["annotation", propIdNode.varId, typeNode.varId, `annotation ${idNode.text!}.${propIdNode.text!} : ${typeNode.text!}`]);
+              emit.annot(propIdNode.varId!, typeNode.varId!);
+              // allConstraints.push(["annotation", propIdNode.varId, typeNode.varId, `annotation ${idNode.text!}.${propIdNode.text!} : ${typeNode.text!}`]);
             }
           }
         }
@@ -903,7 +957,8 @@ function secondPass(filePath: string, node: AstNode) {
           if (index !== undefined && index !== -1) {
             const right = node.children?.[index + 1];
             if (right && right.varId) {
-              allConstraints.push(["sameType", propIdNode.varId, right.varId, `${idNode.text!}.${propIdNode.text!} = ${right.text!}`]);
+              emit.flow(right.varId!, propIdNode.varId!, `property ${idNode.text!}.${propIdNode.text!} = ${right.text!}`);
+              // allConstraints.push(["sameType", propIdNode.varId, right.varId, `${idNode.text!}.${propIdNode.text!} = ${right.text!}`]);
             }
           }
         }
@@ -920,25 +975,31 @@ function secondPass(filePath: string, node: AstNode) {
         const propIdNode = node.children?.find(n => n.kind === "Identifier");
         if (propIdNode && propIdNode.varId !== undefined) {
 
-          let funcType: TypeNode = { kind: "function", name: propIdNode?.text!, id: propIdNode?.varId!, params: [], returnType: UNKNOWN };
+          // let funcType: TypeNode = { kind: "function", name: propIdNode?.text!, id: propIdNode?.varId!, params: [], returnType: UNKNOWN };
           const index = node.children?.findIndex(n => n.kind === "ColonToken");
           // 类型注解
           if (index !== undefined && index !== -1) {
             const typeNode = node.children?.[index + 1];
             if (typeNode && typeNode.varId) {
-              allConstraints.push(["returnAnnotation", propIdNode.varId, typeNode.varId, `return type of method ${idNode.text!}`]);
+              emit.returnAnnot(propIdNode.varId!, typeNode.varId!);
+              // allConstraints.push(["returnAnnotation", propIdNode.varId, typeNode.varId, `return type of method ${idNode.text!}`]);
             }
           } else if (findNodesByKind(node, "ReturnStatement").length === 0) {
             // 如果没有返回类型注解并且没有Return语句
-            funcType.returnType = VOID;
+            // funcType.returnType = VOID;
+            emit.returnVoid(propIdNode.varId!);
           } else {
-            funcType.returnType = UNKNOWN;
+            // funcType.returnType = UNKNOWN;
           }
 
-          const typeId = newTypeNode(funcType);
-          setTypeVar(propIdNode.varId!, typeId);
+          meta.funcName.set(node.varId!, propIdNode.text!);
+          emit.allocFunction(node.varId!, propIdNode.varId!);
+          emit.prop(idNode.varId!, propIdNode.varId!);
+          // //
+          // const typeId = newTypeNode(funcType);
+          // setTypeVar(propIdNode.varId!, typeId);
 
-          allConstraints.push(["initProperty", idNode.varId, propIdNode.varId, `${idNode.text}.${propIdNode.text!}`]);
+          // allConstraints.push(["initProperty", idNode.varId, propIdNode.varId, `${idNode.text}.${propIdNode.text!}`]);
           // allConstraints.push(["takeProperty", propIdNode.varId!, idNode.varId!, `${propIdNode.text!}.${idNode.text!}`]);
         }
       }
@@ -950,15 +1011,14 @@ function secondPass(filePath: string, node: AstNode) {
         idNode = idNode?.kind === "ObjectLiteralExpression" ? idNode : idNode?.children?.find(n => n.kind === "Identifier");
         if (!idNode || idNode.varId === undefined) return;
 
-        const propIdNode = node.children?.find(n => n.kind === "ConstructorKeyword");
-        if (propIdNode && propIdNode.varId !== undefined) {
-          constructors[idNode.varId] = propIdNode?.varId;
-          let funcType: TypeNode = { kind: "function", name: propIdNode?.text!, id: propIdNode?.varId!, params: [], returnType: VOID };
-          const typeId = newTypeNode(funcType);
-          setTypeVar(propIdNode.varId!, typeId);
+          constructors[idNode.varId] = node?.varId!;
+          emit.allocFunction(node.varId!, node.varId!);
+          emit.prop(idNode.varId!, node.varId!);
+          // let funcType: TypeNode = { kind: "function", name: propIdNode?.text!, id: propIdNode?.varId!, params: [], returnType: VOID };
+          // const typeId = newTypeNode(funcType);
+          // setTypeVar(propIdNode.varId!, typeId);
 
-          allConstraints.push(["initProperty", idNode.varId, propIdNode.varId, `${idNode.text}.${propIdNode.text!}`]);
-        }
+          // allConstraints.push(["initProperty", idNode.varId, propIdNode.varId, `${idNode.text}.${propIdNode.text!}`]);
       }
     },
     // 处理模块声明
@@ -966,8 +1026,9 @@ function secondPass(filePath: string, node: AstNode) {
       const idNode = node.children?.find(n => n.kind === "Identifier");
 
       if(idNode && idNode.varId) {
-        const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
-        setTypeVar(idNode.varId!, typeId);
+        emit.allocObj(idNode.varId!);
+        // const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
+        // setTypeVar(idNode.varId!, typeId);
         varBindings.set(idNode.text!, idNode.varId!);
       }
     },
@@ -993,16 +1054,19 @@ function secondPass(filePath: string, node: AstNode) {
       const nsimpt = findNodesByKind(node, "NamespaceImport")[0];
       idNode = nsimpt?.children?.find(n => n.kind === "Identifier");
       if (idNode?.varId && idNode?.text) {
-        const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
-        setTypeVar(idNode.varId!, typeId);
+        emit.allocObj(idNode.varId!);
+        // const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
+        // setTypeVar(idNode.varId!, typeId);
         varBindings.set(idNode.text, idNode.varId);
 
         if (!resolvedFile) {
-          allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${idNode.text} from ${moduleSpecifier}`]);
+          emit.flow(0, idNode.varId!, `Failed import ${idNode.text} from ${moduleSpecifier}`);
+          // allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${idNode.text} from ${moduleSpecifier}`]);
         } else {
           for (const symb in globalExportMap[resolvedFile]) {
-            allConstraints.push(["initProperty", idNode.varId!, globalExportMap[resolvedFile]?.[symb], `${idNode.text!}.${symb}`]);
-            allConstraints.push(["takeProperty", globalExportMap[resolvedFile]?.[symb], idNode.varId!, ``]);
+            emit.prop(idNode.varId!, globalExportMap[resolvedFile][symb]);
+            // allConstraints.push(["initProperty", idNode.varId!, globalExportMap[resolvedFile]?.[symb], `${idNode.text!}.${symb}`]);
+            // allConstraints.push(["takeProperty", globalExportMap[resolvedFile]?.[symb], idNode.varId!, ``]);
           }
         }
       }
@@ -1016,7 +1080,8 @@ function secondPass(filePath: string, node: AstNode) {
           varBindings.set(idNode.text!, idNode.varId!);
 
           if (!resolvedFile) {
-            allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${idNode.text} from ${moduleSpecifier}`]);
+            emit.flow(0, idNode.varId!, `Failed import ${idNode.text} from ${moduleSpecifier}`);
+            // allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${idNode.text} from ${moduleSpecifier}`]);
           } else {
             target = globalExportMap[resolvedFile]?.[idNode.text!];
           }
@@ -1025,14 +1090,16 @@ function secondPass(filePath: string, node: AstNode) {
           varBindings.set(idNode.text!, idNode.varId!);
 
           if (!resolvedFile) {
-            allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${idNode.text} from ${moduleSpecifier}`]);
+            emit.flow(0, idNode.varId!, `Failed import ${idNode.text} from ${moduleSpecifier}`);
+            // allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${idNode.text} from ${moduleSpecifier}`]);
           } else {
             target = globalExportMap[resolvedFile]?.[ndimpt.children[0].text!];
           }
         }
 
         if (target !== undefined && idNode) {
-          allConstraints.push(["sameType", idNode.varId!, target, `Success import ${idNode.text} from ${moduleSpecifier}`]);
+          emit.flow(target, idNode.varId!, `Success import ${idNode.text} from ${moduleSpecifier}`);  
+          // allConstraints.push(["sameType", idNode.varId!, target, `Success import ${idNode.text} from ${moduleSpecifier}`]);
         }
       }
 
@@ -1042,11 +1109,13 @@ function secondPass(filePath: string, node: AstNode) {
         varBindings.set(idNode.text!, idNode.varId!);
 
         if (!resolvedFile) {
+          emit.flow(0, idNode.varId!, `Failed import ${idNode.text} from ${moduleSpecifier}`);
           allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${idNode.text} from ${moduleSpecifier}`]);
         } else {
           const target = globalExportMap[resolvedFile]?.[idNode.text!] === undefined? globalExportMap[resolvedFile]?.["default"] : globalExportMap[resolvedFile]?.[idNode.text!];
           if (target !== undefined) {
-            allConstraints.push(["sameType", idNode.varId!, target, `Success import ${idNode.text} from ${moduleSpecifier}`]);
+            emit.flow(target, idNode.varId!, `Success import ${idNode.text} from ${moduleSpecifier}`);
+            // allConstraints.push(["sameType", idNode.varId!, target, `Success import ${idNode.text} from ${moduleSpecifier}`]);
           }
         }
       }
@@ -1073,13 +1142,15 @@ function secondPass(filePath: string, node: AstNode) {
             if (!resolvedFile) {
               if (LOG_IMPORT)
                 console.warn(`can not resolve import ${moduleSpecifier} in ${filePath}`);
-              allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${symbol} from ${moduleSpecifier}`]);
+              emit.flow(0, idNode.varId!, `Failed import ${symbol} from ${moduleSpecifier}`);
+              // allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${symbol} from ${moduleSpecifier}`]);
               continue;
             }
 
             const target = globalExportMap[resolvedFile]?.[symbol] === undefined? globalExportMap[resolvedFile]?.["default"] : globalExportMap[resolvedFile]?.[symbol];
             if (target !== undefined) {
-              allConstraints.push(["sameType", idNode.varId!, target, `Success import ${symbol} from ${moduleSpecifier}`]);
+              emit.flow(target, idNode.varId!, `Success import ${symbol} from ${moduleSpecifier}`);
+              // allConstraints.push(["sameType", idNode.varId!, target, `Success import ${symbol} from ${moduleSpecifier}`]);
             } else {
               // export xxx from file
               function findfa(file: string) : number | undefined {
@@ -1106,11 +1177,13 @@ function secondPass(filePath: string, node: AstNode) {
               }
               const ret = findfa(resolvedFile);
               if (ret) {
-                allConstraints.push(["sameType", idNode.varId!, ret, `Asesome! Success import ${symbol}(*) from ${moduleSpecifier}`]);
+                emit.flow(ret, idNode.varId!, `Asesome! Success import ${symbol}(*) from ${moduleSpecifier}`);
+                // allConstraints.push(["sameType", idNode.varId!, ret, `Asesome! Success import ${symbol}(*) from ${moduleSpecifier}`]);
               } else {
                 if (LOG_IMPORT)
                   console.warn(`Symbol ${symbol} not found in export map of ${resolvedFile} in ${filePath}`);
-                allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${symbol} from ${moduleSpecifier}`]);
+                emit.flow(0, idNode.varId!, `Failed import ${symbol} from ${moduleSpecifier}`);
+                // allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${symbol} from ${moduleSpecifier}`]);
               }
             }
           }
@@ -1120,87 +1193,117 @@ function secondPass(filePath: string, node: AstNode) {
 
   const handlers: Record<string, (node: AstNode) => void> = {
     StringLiteral(node) {
-      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: node.text?.replace(/^['"`]|['"`]$/g, "") ?? "unknown text"}), `${node.text!} ∈ string`]);
-      syntaxNodes[node.varId!].v8kind = "Literal"
+      emit.allocLiteral(node.varId!, node.text?.replace(/^['"`]|['"`]$/g, "") ?? "unknown text", STRING);
+      // allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: node.text?.replace(/^['"`]|['"`]$/g, "") ?? "unknown text"}), `${node.text!} ∈ string`]);
+      // syntaxNodes[node.varId!].v8kind = "Literal"
+      meta.v8Kind.set(node.varId!, "Literal");
     },
     NoSubstitutionTemplateLiteral(node) {
-      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: node.text?.replace(/^['"`]|['"`]$/g, "") ?? "unknown text"}), `${node.text!} ∈ string`]);
+      emit.allocLiteral(node.varId!, node.text?.replace(/^['"`]|['"`]$/g, "") ?? "unknown text", STRING);
+      // allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: node.text?.replace(/^['"`]|['"`]$/g, "") ?? "unknown text"}), `${node.text!} ∈ string`]);
     },
     FirstLiteralToken(node) {
       // 暂时默认为数字
-      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: Number(node.text)}), `${node.text!} ∈ number`]);
-      syntaxNodes[node.varId!].v8kind = "Literal"
+      emit.allocLiteral(node.varId!, Number(node.text), NUMBER);
+      // allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: Number(node.text)}), `${node.text!} ∈ number`]);
+      // syntaxNodes[node.varId!].v8kind = "Literal"
+      meta.v8Kind.set(node.varId!, "Literal");
     },
     NumericLiteral(node) {
-      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: Number(node.text)}), `${node.text!} ∈ number`]);
-      syntaxNodes[node.varId!].v8kind = "Literal"
+      emit.allocLiteral(node.varId!, Number(node.text), NUMBER);
+      // allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: Number(node.text)}), `${node.text!} ∈ number`]);
+      // syntaxNodes[node.varId!].v8kind = "Literal"
+      meta.v8Kind.set(node.varId!, "Literal");
     },
     TrueKeyword(node) {
-      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: true}), `${node.text!} ∈ boolean`]);
-      syntaxNodes[node.varId!].v8kind = "Literal"
+      emit.allocLiteral(node.varId!, true, BOOLEAN);
+      // allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: true}), `${node.text!} ∈ boolean`]);
+      // syntaxNodes[node.varId!].v8kind = "Literal"
+      meta.v8Kind.set(node.varId!, "Literal");
     },
     FalseKeyword(node) {
-      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: false}), `${node.text!} ∈ boolean`]);
-      syntaxNodes[node.varId!].v8kind = "Literal"
+      emit.allocLiteral(node.varId!, false, BOOLEAN);
+      // allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: false}), `${node.text!} ∈ boolean`]);
+      // syntaxNodes[node.varId!].v8kind = "Literal"
+      meta.v8Kind.set(node.varId!, "Literal");
     },
     NullKeyword(node) {
-      allConstraints.push(["hasType", node.varId!, NULL, `${node.text!} ∈ null`]);
-      syntaxNodes[node.varId!].v8kind = "Literal"
+      emit.allocLiteral(node.varId!, null, NULL);
+      // allConstraints.push(["hasType", node.varId!, NULL, `${node.text!} ∈ null`]);
+      // syntaxNodes[node.varId!].v8kind = "Literal"
+      meta.v8Kind.set(node.varId!, "Literal");
     },
     BigIntLiteral(node) {
-      allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: Number(node.text)}), `${node.text!} ∈ number`]);
-      syntaxNodes[node.varId!].v8kind = "Literal"
+      emit.allocLiteral(node.varId!, BigInt(node.text ?? "0"), BIGINT);
+      // allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: Number(node.text)}), `${node.text!} ∈ number`]);
+      // syntaxNodes[node.varId!].v8kind = "Literal"
+      meta.v8Kind.set(node.varId!, "Literal");
     },
     RegularExpressionLiteral(node) {
-      allConstraints.push(["hasType", node.varId!, REGEXP, `${node.text!} ∈ RegExp`]);
-      syntaxNodes[node.varId!].v8kind = "RegExpLiteral"
+      emit.allocLiteral(node.varId!, new RegExp(node.text?.slice(1, node.text.lastIndexOf("/")) || ""), REGEXP);
+      // allConstraints.push(["hasType", node.varId!, REGEXP, `${node.text!} ∈ RegExp`]);
+      // syntaxNodes[node.varId!].v8kind = "RegExpLiteral"
+      meta.v8Kind.set(node.varId!, "RegExpLiteral");
     },
     ArrayLiteralExpression(node) {
-      syntaxNodes[node.varId!].v8kind = "ArrayLiteral"
-      setTypeVar(node.varId!, newTypeNode({ kind: "array", elementType: UNKNOWN }));
+      // syntaxNodes[node.varId!].v8kind = "ArrayLiteral"
+      meta.v8Kind.set(node.varId!, "ArrayLiteral");
+      emit.allocArray(node.varId!);
+      // setTypeVar(node.varId!, newTypeNode({ kind: "array", elementType: UNKNOWN }));
       for (const child of node.children?.find(c => c.kind === "SyntaxList")?.children?.filter(c => c.kind !== "CommaToken") || []) {
-        allConstraints.push(["makeArray", node.varId!, child.varId!, `element ${child.text!} of array ${node.text!}`]);
+        emit.arrayElement(node.varId!, child.varId!);
+        // allConstraints.push(["makeArray", node.varId!, child.varId!, `element ${child.text!} of array ${node.text!}`]);
       }
     },
     TemplateExpression(node) {
-      allConstraints.push(["hasType", node.varId!, STRING, `${node.text!} ∈ string`]);
-      syntaxNodes[node.varId!].v8kind = "TemplateLiteral";
+      emit.allocLiteral(node.varId!, node.text ?? "", STRING);
+      // allConstraints.push(["hasType", node.varId!, STRING, `${node.text!} ∈ string`]);
+      // syntaxNodes[node.varId!].v8kind = "TemplateLiteral";
+      meta.v8Kind.set(node.varId!, "TemplateLiteral");
     },
     FirstTemplateToken(node) {
-      allConstraints.push(["hasType", node.varId!, STRING, `${node.text!} ∈ string`]);
-      syntaxNodes[node.varId!].v8kind = "TemplateLiteral";
+      emit.allocLiteral(node.varId!, node.text ?? "", STRING);
+      // allConstraints.push(["hasType", node.varId!, STRING, `${node.text!} ∈ string`]);
+      // syntaxNodes[node.varId!].v8kind = "TemplateLiteral";
+      meta.v8Kind.set(node.varId!, "TemplateLiteral");
     },
     // 处理类型关键字
     NumberKeyword(node) {
       if (node.varId === undefined) return;
-      allConstraints.push(["hasType", node.varId, NUMBER, `${node.text!} ∈ number`]);
+      emit.allocPrimitive(node.varId!, NUMBER);
+      // allConstraints.push(["hasType", node.varId, NUMBER, `${node.text!} ∈ number`]);
     },
     StringKeyword(node) {
       if (node.varId === undefined) return;
-      allConstraints.push(["hasType", node.varId, STRING, `${node.text!} ∈ string`]);
+      emit.allocPrimitive(node.varId!, STRING);
+      // allConstraints.push(["hasType", node.varId, STRING, `${node.text!} ∈ string`]);
     },
     BooleanKeyword(node) {
       if (node.varId === undefined) return;
-      allConstraints.push(["hasType", node.varId, BOOLEAN, `${node.text!} ∈ boolean`]);
+      emit.allocPrimitive(node.varId!, BOOLEAN);
+      // allConstraints.push(["hasType", node.varId, BOOLEAN, `${node.text!} ∈ boolean`]);
     },
     VoidKeyword(node) {
       if (node.varId === undefined) return;
-      allConstraints.push(["hasType", node.varId, VOID, `${node.text!} ∈ void`]);
+      emit.allocPrimitive(node.varId!, VOID);
+      // allConstraints.push(["hasType", node.varId, VOID, `${node.text!} ∈ void`]);
     },
     AnyKeyword(node) {
       if (node.varId === undefined) return;
-      allConstraints.push(["hasType", node.varId, ANY, `${node.text!} ∈ any`]);
+      emit.allocPrimitive(node.varId!, ANY);
+      // allConstraints.push(["hasType", node.varId, ANY, `${node.text!} ∈ any`]);
     },
     UndefinedKeyword(node) {
       if (node.varId === undefined) return;
-      allConstraints.push(["hasType", node.varId, UNDEFINED, `${node.text!} ∈ undefined`]);
+      emit.allocPrimitive(node.varId!, UNDEFINED);
+      // allConstraints.push(["hasType", node.varId, UNDEFINED, `${node.text!} ∈ undefined`]);
     },
-    ObjectKeyword(node) {
-      // 用法存疑
-      if (node.varId === undefined) return;
-      const id = newTypeNode({ kind: "object", name: "Object", id: node.varId!, properties: Object.create(null) });
-      allConstraints.push(["hasType", node.varId, id, `${node.text!} ∈ Object`]);
-    },
+    // ObjectKeyword(node) {
+    //   // 用法存疑
+    //   if (node.varId === undefined) return;
+    //   const id = newTypeNode({ kind: "object", name: "Object", id: node.varId!, properties: Object.create(null) });
+    //   allConstraints.push(["hasType", node.varId, id, `${node.text!} ∈ Object`]);
+    // },
     ThisKeyword(node) {
       if (node.varId === undefined) return;
       // syntaxNodes[node.varId!].v8kind = "ThisExpression";
@@ -1219,90 +1322,95 @@ function secondPass(filePath: string, node: AstNode) {
       const typeId = varBindings.get("this");
 
       if (typeId !== undefined) {
-        allConstraints.push(["sameID", node.varId!, typeId, `same identifier: ${node.text!}`]);
+        emit.flow(typeId, node.varId!, `this keyword`);
+        // allConstraints.push(["sameID", node.varId!, typeId, `same identifier: ${node.text!}`]);
       }
       else {
         // varBindings.set(node.text, node.varId!);
         // console.warn(`Identifier ${node.text} not found in varBindings, using its own varId ${node.varId}`);
       }
     },
-    LiteralType(node) {
-      if (node.varId === undefined) return;
-      const id = newTypeNode({ kind: "primitive", name: node.text || "unknown LiteralType" });
-      allConstraints.push(["hasType", node.varId, id, `${node.text!} ∈ ${node.text!}`]);
-    },
-    ArrayType(node) {
-      if (node.children && node.children.length >= 3) {
-        const elementTypeNode = node.children[0];
-        if (elementTypeNode.varId !== undefined && node.varId !== undefined) {
-          allConstraints.push(["makeArray", node.varId, elementTypeNode.varId, `${node.text!} ∈ ${elementTypeNode.text}[]`]);
-          setTypeVar(node.varId!, newTypeNode({ kind: "array", elementType: UNKNOWN }) );
-        }
-      }
-    },
-    UnionType(node) {
-      // UnionTypee : { SyntaxList : { keywd1 | keywd2 } } 
-      if (node.children) {
-        const n = node.children[0];
-        if (n.children && n.children.length > 0) {
-          const types: number[] = [];
-          for (const child of n.children) {
-            if (child.varId !== undefined && child.kind !== "BarToken") {
-              allConstraints.push(["sameType", node.varId!, child.varId, `UnionType ${child.text!}`]);
-            }
-          }
-        }
-      }
-    },
-    PropType(node) {
-      // if (node.children) {
-      //   const types: number[] = [];
-      //   for (const child of node.children[0].children || []) {
-      //     if (child.varId !== undefined && child.varId in typeNodes) {
-      //       types.push(child.varId);
-      //     }
-      //   }
-      //   if (types.length > 0 && node.varId !== undefined) {
-      //     const id = newTypeNode({ kind: "union", types });
-      //     allConstraints.push(["hasType", node.varId, id, `${node.text!} ∈ ${types.map(printType).join(" | ")}`]);
-      //   }
-      // }
-    },
-    FunctionType(node) {
-      // (param1: type1, param2: type2) => returnType
-      // 清空param参数
-      paramBindings.clear();
-      // TODO
-    },
-    TypeReference(node) {
-      // TODO
-      if (node.children) {
-        // const idNode = node.children[0];
-        // if (idNode.varId !== undefined && idNode.text) {
-        //   const typeId = varBindings.get(idNode.text);
-        //   if (typeId !== undefined) {
-        //     allConstraints.push(["sameID", node.varId!, typeId, `same Type: ${idNode.text!}`]);
-        //   } else {
-        //     // console.warn(`TypeReference ${idNode.text} not found in varBindings`);
-        //   }
-        // }
-        const idNode = node.children[0];
-        if (idNode.varId !== undefined) {
-          allConstraints.push(["sameID", node.varId!, idNode.varId, `TypeReference ${idNode.text!}`]);
-        }
-      }
-    },
+    // LiteralType(node) {
+    //   if (node.varId === undefined) return;
+    //   const id = newTypeNode({ kind: "primitive", name: node.text || "unknown LiteralType" });
+    //   allConstraints.push(["hasType", node.varId, id, `${node.text!} ∈ ${node.text!}`]);
+    // },
+    // ArrayType(node) {
+    //   if (node.children && node.children.length >= 3) {
+    //     const elementTypeNode = node.children[0];
+    //     if (elementTypeNode.varId !== undefined && node.varId !== undefined) {
+    //       allConstraints.push(["makeArray", node.varId, elementTypeNode.varId, `${node.text!} ∈ ${elementTypeNode.text}[]`]);
+    //       setTypeVar(node.varId!, newTypeNode({ kind: "array", elementType: UNKNOWN }) );
+    //     }
+    //   }
+    // },
+    // UnionType(node) {
+    //   // UnionTypee : { SyntaxList : { keywd1 | keywd2 } } 
+    //   if (node.children) {
+    //     const n = node.children[0];
+    //     if (n.children && n.children.length > 0) {
+    //       const types: number[] = [];
+    //       for (const child of n.children) {
+    //         if (child.varId !== undefined && child.kind !== "BarToken") {
+    //           allConstraints.push(["sameType", node.varId!, child.varId, `UnionType ${child.text!}`]);
+    //         }
+    //       }
+    //     }
+    //   }
+    // },
+    // PropType(node) {
+    //   // if (node.children) {
+    //   //   const types: number[] = [];
+    //   //   for (const child of node.children[0].children || []) {
+    //   //     if (child.varId !== undefined && child.varId in typeNodes) {
+    //   //       types.push(child.varId);
+    //   //     }
+    //   //   }
+    //   //   if (types.length > 0 && node.varId !== undefined) {
+    //   //     const id = newTypeNode({ kind: "union", types });
+    //   //     allConstraints.push(["hasType", node.varId, id, `${node.text!} ∈ ${types.map(printType).join(" | ")}`]);
+    //   //   }
+    //   // }
+    // },
+    // FunctionType(node) {
+    //   // (param1: type1, param2: type2) => returnType
+    //   // 清空param参数
+    //   paramBindings.clear();
+    //   // TODO
+    // },
+    // TypeReference(node) {
+    //   // TODO
+    //   if (node.children) {
+    //     // const idNode = node.children[0];
+    //     // if (idNode.varId !== undefined && idNode.text) {
+    //     //   const typeId = varBindings.get(idNode.text);
+    //     //   if (typeId !== undefined) {
+    //     //     allConstraints.push(["sameID", node.varId!, typeId, `same Type: ${idNode.text!}`]);
+    //     //   } else {
+    //     //     // console.warn(`TypeReference ${idNode.text} not found in varBindings`);
+    //     //   }
+    //     // }
+    //     const idNode = node.children[0];
+    //     if (idNode.varId !== undefined) {
+    //       allConstraints.push(["sameID", node.varId!, idNode.varId, `TypeReference ${idNode.text!}`]);
+    //     }
+    //   }
+    // },
     // 赋予属性
     PropertyAssignment(node) {
       if (node.children?.length === 3) {
         // 清楚引号
         const idNode = node.children[0].kind === "StringLiteral" ? node.children[0].text?.slice(1, -1) : node.children[0].text;
         if (!idNode) return;
-        syntaxNodes[node.children[2].varId!].text = idNode; 
-        syntaxNodes[node.children[2].varId!].v8kind = undefined;
+        meta.propName.set(node.varId!, idNode);
+        meta.v8Kind.delete(node.children[2].varId!);
+        // syntaxNodes[node.children[2].varId!].text = idNode; 
+        // syntaxNodes[node.children[2].varId!].v8kind = undefined;
         const obj = node.parent?.parent;
         if (!obj || !obj.varId) return;
-        allConstraints.push(["initProperty", obj.varId, node.children[2].varId!, idNode!]);
+        emit.flow(node.children[2].varId!, node.varId!, `${node.text}`);
+        emit.prop(obj.varId, node.varId!);
+        // allConstraints.push(["initProperty", obj.varId, node.children[2].varId!, idNode!]);
       }
     },
     // 短赋予属性
@@ -1310,7 +1418,11 @@ function secondPass(filePath: string, node: AstNode) {
       if (node.children) {
         const obj = node.parent?.parent;
         if (!obj || !obj.varId) return;
-        allConstraints.push(["initProperty", obj.varId, node.children[0].varId!, node.children[0].text!]);
+        meta.propName.set(node.varId!, node.text!);
+        meta.v8Kind.delete(node.children[0].varId!);
+        emit.flow(node.children[0].varId!, node.varId!, `${node.text}`);
+        emit.prop(obj.varId, node.varId!);
+        // allConstraints.push(["initProperty", obj.varId, node.children[0].varId!, node.children[0].text!]);
       }
     },
     FirstNode(node) {
@@ -1324,14 +1436,17 @@ function secondPass(filePath: string, node: AstNode) {
           // 处理属性访问
           const propName = right.text;
           if (propName) {
-            allConstraints.push(["takeProperty", node.varId!, left.varId!, `${left.text!}.${propName}`]);
+            meta.propName.set(node.varId!, propName); 
+            emit.prop(left.varId!, node.varId!);
+            // allConstraints.push(["takeProperty", node.varId!, left.varId!, `${left.text!}.${propName}`]);
           }
         }
       }
     },
     TypeOfExpression(node) {
       if (node.children && node.children.length >= 2) {
-        syntaxNodes[node.varId!].v8kind = "UnaryOperation";
+        meta.v8Kind.set(node.varId!, "UnaryOperation");
+        // syntaxNodes[node.varId!].v8kind = "UnaryOperation";
         const operator = node.children[0]!;
         const operand = node.children[1]!;
         operator_cnts.set(operator.text!, (operator_cnts.get(operator.text!) || 0) + 1);
@@ -1339,34 +1454,54 @@ function secondPass(filePath: string, node: AstNode) {
       }
     },
     VoidExpression(node) {
-      syntaxNodes[node.varId!].v8kind = "UnaryOperation";
+      meta.v8Kind.set(node.varId!, "UnaryOperation");
+      // syntaxNodes[node.varId!].v8kind = "UnaryOperation";
     },
     YieldExpression(node) {
-      syntaxNodes[node.varId!].v8kind = node.children?.find(c => c.kind === "AsterisToken") ? "YieldStar" : "Yield";
+      meta.v8Kind.set(node.varId!, node.children?.find(c => c.kind === "AsterisToken") ? "YieldStar" : "Yield");  
+      // syntaxNodes[node.varId!].v8kind = node.children?.find(c => c.kind === "AsterisToken") ? "YieldStar" : "Yield";
     },
     // 处理一元操作
     PrefixUnaryExpression(node) {
       if (node.children && node.children.length >= 2) {
         const operator = node.children[0];
         const exprNode = node.children[1];
-        syntaxNodes[node.varId!].offset = operator.offset;
-        syntaxNodes[node.varId!].v8kind = operator.text === "++" || operator.text === "--" ? "CountOperation" : "UnaryOperation";
+        meta.offset.set(node.varId!, operator.offset);
+        meta.v8Kind.set(node.varId!, operator.text === "++" || operator.text === "--" ? "CountOperation" : "UnaryOperation");
+        // syntaxNodes[node.varId!].offset = operator.offset;
+        // syntaxNodes[node.varId!].v8kind = operator.text === "++" || operator.text === "--" ? "CountOperation" : "UnaryOperation";
         operator_cnts.set(operator.text!, (operator_cnts.get(operator.text!) || 0) + 1);
         operands.set(operator.text!, (operands.get(operator.text!) || new Set()).add(exprNode.varId!));
-        if (exprNode.varId !== undefined) {
-          if (operator.kind === "ExclamationToken") {
-            allConstraints.push(["hasType", node.varId!, BOOLEAN, `!${exprNode.text!} ∈ boolean`]);
-            allConstraints.push(["refersTo", node.varId!, exprNode.varId!, `!${exprNode.text!}`]);
-          } else if (operator.kind === "MinusToken") {
-            allConstraints.push(["sameType", node.varId!, exprNode.varId!, `-${exprNode.text!}`]);
-            allConstraints.push(["refersTo", node.varId!, exprNode.varId!, `!${exprNode.text!}`]);
-          }
-        }
+        emit.unaryOp(operator.text!, exprNode.varId!, node.varId!);
+        // if (exprNode.varId !== undefined) {
+        //   if (operator.kind === "ExclamationToken") {
+        //     emit.allocPrimitive(node.varId!, BOOLEAN);
+        //     // allConstraints.push(["hasType", node.varId!, BOOLEAN, `!${exprNode.text!} ∈ boolean`]);
+        //     // allConstraints.push(["refersTo", node.varId!, exprNode.varId!, `!${exprNode.text!}`]);
+        //   } else if (operator.kind === "PlusToken" || operator.kind === "MinusToken" || operator.kind === "TildeToken") {
+        //     emit.allocPrimitive(node.varId!, NUMBER);
+        //     // allConstraints.push(["sameType", node.varId!, exprNode.varId!, `-${exprNode.text!}`]);
+        //     // allConstraints.push(["refersTo", node.varId!, exprNode.varId!, `!${exprNode.text!}`]);
+        //   } else if (operator.kind === "PlusPlusToken" || operator.kind === "MinusMinusToken") {
+        //     emit.allocPrimitive(node.varId!, NUMBER);
+        //     emit.flow(node.varId!, exprNode.varId!, `${operator.text}${exprNode.text!}`);
+        //   }
+        // }
       }
       // TODO: 处理其他一元操作
     },
     PostfixUnaryExpression(node) {
-      syntaxNodes[node.varId!].v8kind = "CountOperation";
+      // syntaxNodes[node.varId!].v8kind = "CountOperation";
+      const exprNode = node.children![0];
+      const operator = node.children![1];
+      meta.v8Kind.set(node.varId!, "CountOperation");
+      meta.offset.set(node.varId!, operator.offset);
+      // syntaxNodes[node.varId!].offset = operator.offset;
+      operator_cnts.set(operator.text!, (operator_cnts.get(operator.text!) || 0) + 1);
+      operands.set(operator.text!, (operands.get(operator.text!) || new Set()).add(exprNode.varId!));
+      emit.unaryOp(operator.text!, exprNode.varId!, node.varId!);
+      // emit.allocPrimitive(node.varId!, NUMBER);
+      // emit.flow(node.varId!, exprNode.varId!, `${exprNode.text!}${operator.text}`);
     },
     // 二元操作
     BinaryExpression(node) {
@@ -1375,125 +1510,164 @@ function secondPass(filePath: string, node: AstNode) {
         const operator = node.children[1];
         const right = node.children[2];
         if (!left.varId || !right.varId) return;
-        if(syntaxNodes[node.varId!].v8kind !== "NaryOperation") syntaxNodes[node.varId!].offset = operator.offset;
+        if (meta.v8Kind.get(node.varId!) !== "NaryOperation") meta.offset.set(node.varId!, operator.offset);
+        // if(syntaxNodes[node.varId!].v8kind !== "NaryOperation") syntaxNodes[node.varId!].offset = operator.offset;
         operator_cnts.set(operator.text!, (operator_cnts.get(operator.text!) || 0) + 1);
         operands.set(operator.text!, (operands.get(operator.text!) || new Set()).add(left.varId));
         operands.set(operator.text!, (operands.get(operator.text!) || new Set()).add(right.varId));
+        emit.binaryOp(operator.text!, left.varId!, right.varId!, node.varId!);
 
-        const assignmentOperators = ["FirstAssignment","FirstCompoundAssignment","MinusEqualsToken","AsteriskEqualsToken","SlashEqualsToken","PercentEqualsToken","AsteriskAsteriskEqualsToken","AmpersandEqualsToken","BarEqualsToken"];
+        const compoundAssignmentOperators = ["FirstCompoundAssignment","MinusEqualsToken","AsteriskEqualsToken","SlashEqualsToken","PercentEqualsToken","AsteriskAsteriskEqualsToken","AmpersandEqualsToken","BarEqualsToken"];
         const arithmeticOperators = ["PlusToken","MinusToken","AsteriskToken","SlashToken","PercentToken","AsteriskAsteriskToken"];
         const logicalOperators = ["AmpersandAmpersandToken", "BarBarToken", "QuestionQuestionToken"];
         const comparisonOperators = ["LessThanToken","GreaterThanToken","LessThanEqualsToken","GreaterThanEqualsToken","EqualsEqualsToken","ExclamationEqualsToken","EqualsEqualsEqualsToken","ExclamationEqualsEqualsToken"];
         const bitwiseOperators = ["AmpersandToken","BarToken","CaretToken","TildeToken","LessThanLessThanToken","GreaterThanGreaterThanToken","GreaterThanGreaterThanGreaterThanToken"];
 
         // 处理赋值操作
-        if (assignmentOperators.includes(operator.kind)) {
-          syntaxNodes[node.varId!].v8kind = operator.kind === "FirstAssignment" ? "Assignment" : "CompoundAssignment";
-          syntaxNodes[left.varId!].v8kind = undefined;
-          allConstraints.push(["sameType", left.varId, right.varId, `${left.text!} = ${right.text!}`]);
-          allConstraints.push(["sameType", node.varId!, right.varId, `${node.text!} = ${right.text!}`]);
-          // allConstraints.push(["sameType", right.varId!, left.varId, `${left.text!} = ${right.text!}`]);
-          // 处理对象属性设置
-          if (left.kind === "PropertyAccessExpression" && left.children && left.children.length! >= 3) {
-            syntaxNodes[node.varId!].v8kind = undefined;
-            allConstraints.push(["setProperty", left.children[0].varId!, left.varId, `${left.children[0].text}.${left.children[2].text} = ${right.text}`]);
-          } else if (left.kind === "ElementAccessExpression" && left.children && left.children.length! >= 4) {
-            syntaxNodes[node.varId!].v8kind = undefined;
-            allConstraints.push(["setElement", left.children[0].varId!, left.varId, `${left.children[0].text}[${left.children[2].text}] = ${right.text}`]);
-          }
+        if (operator.kind === "FirstAssignment") {
+          meta.v8Kind.set(node.varId!, "Assignment");
+          meta.v8Kind.delete(left.varId!);
+          // syntaxNodes[node.varId!].v8kind = "Assignment";
+          // syntaxNodes[left.varId!].v8kind = undefined;
+          // emit.flow(right.varId!, left.varId!, `${left.text!} = ${right.text!}`);
+        }
+        if (compoundAssignmentOperators.includes(operator.kind)) {
+          meta.v8Kind.set(node.varId!, "CompoundAssignment");
+          meta.v8Kind.delete(left.varId!);
+          // syntaxNodes[node.varId!].v8kind = "CompoundAssignment";
+          // syntaxNodes[left.varId!].v8kind = undefined;
+          // emit.allocPrimitive(node.varId!, NUMBER);
+          // emit.flow(node.varId!, left.varId!, `${left.text!} ${operator.text} ${right.text!}`);
+          // allConstraints.push(["sameType", left.varId, right.varId, `${left.text!} = ${right.text!}`]);
+          // allConstraints.push(["sameType", node.varId!, right.varId, `${node.text!} = ${right.text!}`]);
+          // // allConstraints.push(["sameType", right.varId!, left.varId, `${left.text!} = ${right.text!}`]);
+          // // 处理对象属性设置
+          // if (left.kind === "PropertyAccessExpression" && left.children && left.children.length! >= 3) {
+          //   syntaxNodes[node.varId!].v8kind = undefined;
+          //   allConstraints.push(["setProperty", left.children[0].varId!, left.varId, `${left.children[0].text}.${left.children[2].text} = ${right.text}`]);
+          // } else if (left.kind === "ElementAccessExpression" && left.children && left.children.length! >= 4) {
+          //   syntaxNodes[node.varId!].v8kind = undefined;
+          //   allConstraints.push(["setElement", left.children[0].varId!, left.varId, `${left.children[0].text}[${left.children[2].text}] = ${right.text}`]);
+          // }
         }
         // 处理加减乘除模运算
         else if (arithmeticOperators.includes(operator.kind)) {
           // allConstraints.push(["sameType", left.varId!, right.varId!, `${left.text!} == ${right.text!}`]);
-          syntaxNodes[node.varId!].v8kind ??= "BinaryOperation";
+          meta.v8Kind.set(node.varId!, "BinaryOperation");
+          // syntaxNodes[node.varId!].v8kind ??= "BinaryOperation";
           if (node.parent?.kind === "BinaryExpression" && node.parent.children?.[1].kind === operator.kind) {
-            syntaxNodes[node.parent.varId!].v8kind = "NaryOperation";
-            syntaxNodes[node.parent.varId!].offset = node.parent.offset;
-            syntaxNodes[node.varId!].v8kind = "invisible";
+            meta.v8Kind.set(node.parent.varId!, "NaryOperation");
+            meta.offset.set(node.parent.varId!, node.parent.offset);
+            meta.v8Kind.set(node.varId!, "invisible");
+            // syntaxNodes[node.parent.varId!].v8kind = "NaryOperation";
+            // syntaxNodes[node.parent.varId!].offset = node.parent.offset;
+            // syntaxNodes[node.varId!].v8kind = "invisible";
           }
-          allConstraints.push(["sameType", node.varId!, right.varId!, `${node.text!} = ${right.text!}`]);
-          allConstraints.push(["sameType", node.varId!, left.varId!, `${node.text!} == ${left.text!}`]);
+          // allConstraints.push(["sameType", node.varId!, right.varId!, `${node.text!} = ${right.text!}`]);
+          // allConstraints.push(["sameType", node.varId!, left.varId!, `${node.text!} == ${left.text!}`]);
         }
         // 处理逻辑运算
         else if (logicalOperators.includes(operator.kind)) {
-          syntaxNodes[node.varId!].v8kind ??= "BinaryOperation";
+          meta.v8Kind.set(node.varId!, "BinaryOperation");
+          // syntaxNodes[node.varId!].v8kind ??= "BinaryOperation";
           if (node.parent?.kind === "BinaryExpression" && node.parent.children?.[1].kind === operator.kind) {
-            syntaxNodes[node.parent.varId!].v8kind = "NaryOperation";
-            syntaxNodes[node.parent.varId!].offset = node.parent.offset;
-            syntaxNodes[node.varId!].v8kind = "invisible";
+            meta.v8Kind.set(node.parent.varId!, "NaryOperation");
+            meta.offset.set(node.parent.varId!, node.parent.offset);
+            meta.v8Kind.set(node.varId!, "invisible");
+            // //  
+            // syntaxNodes[node.parent.varId!].v8kind = "NaryOperation";
+            // syntaxNodes[node.parent.varId!].offset = node.parent.offset;
+            // syntaxNodes[node.varId!].v8kind = "invisible";
           }
-          allConstraints.push(["sameType", node.varId!, left.varId!, `${node.text!} = ${left.text!}`]);
-          allConstraints.push(["sameType", node.varId!, right.varId!, `${node.text!} = ${right.text!}`]);
+          // allConstraints.push(["sameType", node.varId!, left.varId!, `${node.text!} = ${left.text!}`]);
+          // allConstraints.push(["sameType", node.varId!, right.varId!, `${node.text!} = ${right.text!}`]);
         }
         // 处理比较运算
         else if (comparisonOperators.includes(operator.kind)) {
-          allConstraints.push(["hasType", node.varId!, BOOLEAN, `${node.text!} ∈ boolean`]);
-          syntaxNodes[node.varId!].v8kind = "CompareOperation";
+          // allConstraints.push(["hasType", node.varId!, BOOLEAN, `${node.text!} ∈ boolean`]);
+          meta.v8Kind.set(node.varId!, "CompareOperation");
+          // syntaxNodes[node.varId!].v8kind = "CompareOperation";
           // 认为是同一类型
           // allConstraints.push(["sameType", left.varId, right.varId, `${left.text!} ${operator.text} ${right.text}`]);
           // allConstraints.push(["sameType", right.varId, left.varId, `${left.text!} ${operator.text} ${right.text}`]);
         }
         // 处理位运算
         else if (bitwiseOperators.includes(operator.kind)) {
-          syntaxNodes[node.varId!].v8kind ??= "BinaryOperation";
+          meta.v8Kind.set(node.varId!, "BinaryOperation");
+          // syntaxNodes[node.varId!].v8kind ??= "BinaryOperation";
           if (node.parent?.kind === "BinaryExpression" && node.parent.children?.[1].kind === operator.kind) {
-            syntaxNodes[node.parent.varId!].v8kind = "NaryOperation";
-            syntaxNodes[node.parent.varId!].offset = node.parent.offset;
-            syntaxNodes[node.varId!].v8kind = "invisible";
+            meta.v8Kind.set(node.parent.varId!, "NaryOperation");
+            meta.offset.set(node.parent.varId!, node.parent.offset);
+            meta.v8Kind.set(node.varId!, "invisible");
+            // //
+            // syntaxNodes[node.parent.varId!].v8kind = "NaryOperation";
+            // syntaxNodes[node.parent.varId!].offset = node.parent.offset;
+            // syntaxNodes[node.varId!].v8kind = "invisible";
           }
-          allConstraints.push(["hasType", node.varId!, NUMBER, `${left.text} ${operator.text} ${right.text}`]);
+          // allConstraints.push(["hasType", node.varId!, NUMBER, `${left.text} ${operator.text} ${right.text}`]);
         }
         // instance of
         else if (operator.kind === "InstanceOfKeyword") { 
-          syntaxNodes[node.varId!].v8kind ??= "BinaryOperation";
-          let parent = node.parent;
-          while (parent && parent?.kind !== "FunctionDeclaration") parent = parent.parent;
-          // trick
-          if (parent && parent.kind === "FunctionDeclaration" && parent.children?.[1].text === "_classCallCheck") {
-            allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: true}), `${node.text!} ∈ true`]);
-          } else allConstraints.push(["hasType", node.varId!, BOOLEAN, `${node.text!} ∈ boolean`]);
+          meta.v8Kind.set(node.varId!, "BinaryOperation");
+          // syntaxNodes[node.varId!].v8kind ??= "BinaryOperation";
+          // let parent = node.parent;
+          // while (parent && parent?.kind !== "FunctionDeclaration") parent = parent.parent;
+          // // trick
+          // if (parent && parent.kind === "FunctionDeclaration" && parent.children?.[1].text === "_classCallCheck") {
+          //   allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: true}), `${node.text!} ∈ true`]);
+          // } else allConstraints.push(["hasType", node.varId!, BOOLEAN, `${node.text!} ∈ boolean`]);
         }
         // TODO: 更多二元运算
       }
     },
     // 处理数组字面量
     ElementAccessExpression(node) {
-      syntaxNodes[node.varId!].v8kind = "Property"
+      meta.v8Kind.set(node.varId!, "Property");
+      // syntaxNodes[node.varId!].v8kind = "Property"
       if (node.children && node.children.length >= 3) {
         const left = node.children[0];
         const right = node.children[2];
-        syntaxNodes[node.varId!].offset = node.children[1].offset;
+        meta.offset.set(node.varId!, node.children[1].offset);  
+        // syntaxNodes[node.varId!].offset = node.children[1].offset;
         if (left.varId !== undefined && node.varId !== undefined) {
-          allConstraints.push(["elementAccess", node.varId, left.varId, `${left.text!}[${right.text!}]`]);
+          emit.arrayElement(left.varId!, node.varId!);
+          // allConstraints.push(["elementAccess", node.varId, left.varId, `${left.text!}[${right.text!}]`]);
         }
       }
     },
     // 处理属性访问
     PropertyAccessExpression(node) {
-      syntaxNodes[node.varId!].v8kind = "Property"
+      meta.v8Kind.set(node.varId!, "Property");
+      // syntaxNodes[node.varId!].v8kind = "Property"
       if (node.children && node.children.length >= 3) {
         const left = node.children[0];
         const operator = node.children[1];
         const right = node.children[2];
-        syntaxNodes[node.varId!].offset = right.offset;
-        syntaxNodes[right.varId!].v8kind = undefined;
+        meta.offset.set(node.varId!, right.offset);
+        meta.v8Kind.delete(right.varId!);
+        // syntaxNodes[node.varId!].offset = right.offset;
+        // syntaxNodes[right.varId!].v8kind = undefined;
         // 处理dot运算符
         if ((operator.kind === "DotToken" || operator.kind === "QuestionDotToken") && left.varId !== undefined && right.varId !== undefined) {
           // 处理属性访问
           const propName = right.text;
           if (propName) {
-            allConstraints.push(["takeProperty", node.varId!, left.varId!, `${left.text!}.${propName}`]);
+            meta.propName.set(node.varId!, propName);
+            emit.prop(left.varId!, node.varId!);
+            // allConstraints.push(["takeProperty", node.varId!, left.varId!, `${left.text!}.${propName}`]);
           }
         }
       }
     },
     // New运算符
     NewExpression(node) {
-      syntaxNodes[node.varId!].v8kind = "CallNew"
+      meta.v8Kind.set(node.varId!, "CallNew");  
+      // syntaxNodes[node.varId!].v8kind = "CallNew"
       if (node.children) {
         const classNode = node.children.find(n => n.kind === "Identifier");
         if (classNode?.varId !== undefined) {
-          allConstraints.push(["sameType", node.varId!, classNode.varId, `new ${classNode.text!}`]);
+          emit.newinstance(classNode.varId!, node.varId!);
+          // allConstraints.push(["sameType", node.varId!, classNode.varId, `new ${classNode.text!}`]);
 
           // 处理实参
           const cls = varBindings.get(classNode.text!);
@@ -1506,7 +1680,8 @@ function secondPass(filePath: string, node: AstNode) {
             const args = node.children.find(n => n.kind === "SyntaxList");
             let idx = 0;
             for (const arg of args?.children?.filter(n => n.kind !== "CommaToken") ?? []) {
-              allConstraints.push(["funcToArg", arg.varId!, constr * 1000 + idx, `${node.text}`]);
+              emit.arg(constr, arg.varId!, idx);
+              // allConstraints.push(["funcToArg", arg.varId!, constr * 1000 + idx, `${node.text}`]);
               idx++;
             }
           }
@@ -1518,25 +1693,28 @@ function secondPass(filePath: string, node: AstNode) {
       if (node.children && node.children.length >= 2) {
         const exprNode = node.children[1];
         if (exprNode.varId !== undefined) {
-          allConstraints.push(["sameType", node.varId!, exprNode.varId!, `(${exprNode.text!})`]);
+          emit.flow(exprNode.varId!, node.varId!, `(${exprNode.text!})`);
+          // allConstraints.push(["sameType", node.varId!, exprNode.varId!, `(${exprNode.text!})`]);
         }
       }
     },
-    // 处理非空断言
+    // 处理非空断言: x!
     NoneNullExpression(node) {
       if (node.children && node.children.length >= 2) {
-        const exprNode = node.children[1];
+        const exprNode = node.children[0];
         if (exprNode.varId !== undefined) {
-          allConstraints.push(["sameType", node.varId!, exprNode.varId!, `!${exprNode.text!}`]);
+          emit.flow(exprNode.varId!, node.varId!, `${exprNode.text!}!`);
+          // allConstraints.push(["sameType", node.varId!, exprNode.varId!, `!${exprNode.text!}`]);
         }
       }
     },
     // 处理标识符
     Identifier(node) {
-      if (tsMorphNodes.includes(node.parent?.kind!)) syntaxNodes[node.varId!].v8kind = "VariableProxy";
+      if (tsMorphNodes.includes(node.parent?.kind!)) meta.v8Kind.set(node.varId!, "VariableProxy"); // syntaxNodes[node.varId!].v8kind = "VariableProxy";
       if (node.text) {
         if (node.text === "undefined") {
-          allConstraints.push(["hasType", node.varId!, UNDEFINED, `${node.text!} ∈ undefined`]);
+          emit.allocPrimitive(node.varId!, UNDEFINED);
+          // allConstraints.push(["hasType", node.varId!, UNDEFINED, `${node.text!} ∈ undefined`]);
           return;
         }
         const typeId = paramBindings.get(node.text) ?? varBindings.get(node.text);
@@ -1544,14 +1722,17 @@ function secondPass(filePath: string, node: AstNode) {
         if (typeId !== undefined) {
           if (node.parent?.kind === "PropertyAssignment" && node.parent?.children?.[2] === node) {
             // 属性赋值时不添加sameID约束
-            allConstraints.push(["sameType", node.varId!, typeId, `same identifier: ${node.text!}`]);
-            allConstraints.push(["sameType", typeId, node.varId!, `same identifier: ${node.text!}`]);
+            emit.flow(typeId, node.varId!, `property assignment for ${node.text!}`);
+            // allConstraints.push(["sameType", node.varId!, typeId, `same identifier: ${node.text!}`]);
+            // allConstraints.push(["sameType", typeId, node.varId!, `same identifier: ${node.text!}`]);
           } else {
-            allConstraints.push(["sameID", node.varId!, typeId, `same identifier: ${node.text!}`]);
+            emit.sameID(node.varId!, typeId);
+            // allConstraints.push(["sameID", node.varId!, typeId, `same identifier: ${node.text!}`]);
             if (typeId === node.varId) {
               const makeup = unprocsdVars.get(node.text);
               for (const mu of makeup || []) {
-                allConstraints.push(["sameID", mu, node.varId!, `same identifier by makeup: ${node.text!}`]);
+                emit.sameID(mu, typeId);
+                // allConstraints.push(["sameID", mu, node.varId!, `same identifier by makeup: ${node.text!}`]);
               }
             }
           }
@@ -1573,14 +1754,16 @@ function secondPass(filePath: string, node: AstNode) {
     },
     // 处理三元表达式
     ConditionalExpression(node) {
-      syntaxNodes[node.varId!].v8kind = "Conditional";
+      meta.v8Kind.set(node.varId!, "Conditional");
+      // syntaxNodes[node.varId!].v8kind = "Conditional";
       if (node.children && node.children.length >= 5) {
         const condition = node.children[0];
         const trueBranch = node.children[2];
         const falseBranch = node.children[4];
         if (condition.varId !== undefined && trueBranch.varId !== undefined && falseBranch.varId !== undefined) {
-          allConstraints.push(["sameType", node.varId!, trueBranch.varId!, `? ${trueBranch.text!} : ${falseBranch.text!}`]);
-          allConstraints.push(["sameType", node.varId!, falseBranch.varId!, `? ${trueBranch.text!} : ${falseBranch.text!}`]);
+          emit.ternaryOp(condition.varId!, trueBranch.varId!, falseBranch.varId!, node.varId!);
+          // allConstraints.push(["sameType", node.varId!, trueBranch.varId!, `? ${trueBranch.text!} : ${falseBranch.text!}`]);
+          // allConstraints.push(["sameType", node.varId!, falseBranch.varId!, `? ${trueBranch.text!} : ${falseBranch.text!}`]);
         }
       }
     },
@@ -1596,28 +1779,34 @@ function secondPass(filePath: string, node: AstNode) {
 
         if (!funcNode || !funcNode.varId || !exprNode.varId) return;
         if (exprNode.kind === "SemicolonToken") {
-          allConstraints.push(["hasType", node.varId!, VOID, "return; ∈ VOID"]);
-          allConstraints.push(["returnType", node.varId!, node.varId!, `return;`]);
+          emit.returnVoid(funcNode.varId!);
+          // allConstraints.push(["hasType", node.varId!, VOID, "return; ∈ VOID"]);
+          // allConstraints.push(["returnType", node.varId!, node.varId!, `return;`]);
+        } else {
+          emit.returnStmt(funcNode.varId!, exprNode.varId!);
         }
-        else
-          allConstraints.push(["returnType", funcNode.varId!, exprNode.varId!, `return value of function ${funcNode.text!}`]);
+          // allConstraints.push(["returnType", funcNode.varId!, exprNode.varId!, `return value of function ${funcNode.text!}`]);
       }
     },
     // 处理函数调用
     CallExpression(node) {
-      syntaxNodes[node.varId!].v8kind = "Call";
+      meta.v8Kind.set(node.varId!, "Call");
+      // syntaxNodes[node.varId!].v8kind = "Call";
       if (node.children && node.children.length >= 2) {
         // 不能改为在bindings中查找，因为有可能是匿名函数调用
         const funcNode = node.children[0];
         if (funcNode.varId !== undefined && node.varId !== undefined) {
-          syntaxNodes[node.varId!].offset = funcNode.kind === "PropertyAccessExpression" ? funcNode.children?.[2]?.offset : funcNode.offset;
-          allConstraints.push(["funcCall", node.varId, funcNode.varId, `${node.text}`]);
+          meta.offset.set(node.varId!, funcNode.kind === "PropertyAccessExpression" ? funcNode.children?.[2]?.offset! : funcNode.offset);
+          // syntaxNodes[node.varId!].offset = funcNode.kind === "PropertyAccessExpression" ? funcNode.children?.[2]?.offset : funcNode.offset;
+          emit.call(funcNode.varId!, node.varId!);
+          // allConstraints.push(["funcCall", node.varId, funcNode.varId, `${node.text}`]);
 
           // 处理实参
           const args = node.children.find(n => n.kind === "SyntaxList");
           let idx = 0;
           for (const arg of args?.children?.filter(n => n.kind !== "CommaToken") ?? []) {
-            allConstraints.push(["funcToArg", arg.varId!, funcNode.varId * 1000 + idx, `${node.text}`]);
+            emit.arg(funcNode.varId!, arg.varId!, idx);
+            // allConstraints.push(["funcToArg", arg.varId!, funcNode.varId * 1000 + idx, `${node.text}`]);
             idx++;
           }
         }
@@ -1626,7 +1815,8 @@ function secondPass(filePath: string, node: AstNode) {
     // 处理箭头函数 () => {}
     ArrowFunction(node) {
       // 如果没有block，退出作用域，必须postOrder!
-      syntaxNodes[node.varId!].v8kind = "FunctionLiteral";
+      meta.v8Kind.set(node.varId!, "FunctionLiteral");
+      // syntaxNodes[node.varId!].v8kind = "FunctionLiteral";
       if (!node.children?.some(n => n.kind === "Block")) {
         const previous = scopeStack.pop();
         unprocsdScopes.pop();
@@ -1641,30 +1831,33 @@ function secondPass(filePath: string, node: AstNode) {
           }
           varBindings = previous;  // 恢复上层作用域
         } else {
-          throw new Error("Scope stack underflow: too many closing braces");
+          console.error("Scope stack underflow: too many closing braces");
         }
       }
       // TODO: 其余操作
       if (node.children) {
+        emit.allocFunction(node.varId!, node.varId!);
         const index = node.children?.findIndex(n => n.kind === "ColonToken");
         // 类型注解
         if (index !== undefined && index !== -1) {
           const typeNode = node.children?.[index + 1];
           if (typeNode && typeNode.varId) {
-            const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: node.varId!, params: [], returnType: UNKNOWN });
-            setTypeVar(node.varId!, id);
-            allConstraints.push(["returnAnnotation", node?.varId!, typeNode.varId, `return type of function ${node?.text!}`]);
+            emit.returnAnnot(node.varId!, typeNode.varId!);
+            // const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: node.varId!, params: [], returnType: UNKNOWN });
+            // setTypeVar(node.varId!, id);
+            // allConstraints.push(["returnAnnotation", node?.varId!, typeNode.varId, `return type of function ${node?.text!}`]);
           }
         }
         else if (findNodesByKind(node, "ReturnStatement").length === 0) {
           // 如果没有返回类型注解并且没有Return语句
-          const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: node?.varId!, params: [], returnType: VOID });
-         setTypeVar(node.varId!, id);
+          emit.returnVoid(node.varId!);
+          // const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: node?.varId!, params: [], returnType: VOID });
+          // setTypeVar(node.varId!, id);
         }
-        else {
-          const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: node?.varId!, params: [], returnType: UNKNOWN });
-         setTypeVar(node.varId!, id);
-        }
+        // else {
+        //   const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: node?.varId!, params: [], returnType: UNKNOWN });
+        //   setTypeVar(node.varId!, id);
+        // }
       }
 
     },
@@ -1686,15 +1879,16 @@ function secondPass(filePath: string, node: AstNode) {
         paramBindings.clear();
       }
     },
-    // 处理类型断言
+    // 处理类型断言和as表达式
     AsExpression(node) {
       if (node.children && node.children.length >= 3) {
         const exprNode = node.children[0];
-        const typeNode = node.children[2];
-        if (exprNode.varId !== undefined && node.varId !== undefined && typeNode.text) {
-          allConstraints.push(["sameType", node.varId!, exprNode.varId!, `${exprNode.text!} as ${typeNode.text!}`]);
-          // TODO: 添加类型断言约束
+        const asExprNode = node.children[2];
+        if (exprNode.varId !== undefined && node.varId !== undefined && asExprNode.text) {
+          emit.flow(exprNode.varId!, asExprNode.varId!, `${exprNode.text!} as ${asExprNode.text!}`);
         }
+        // TODO: 添加类型断言约束
+        const typeNode = node.children[2];
       }
     },
     // 处理作用域{
@@ -1728,7 +1922,7 @@ function secondPass(filePath: string, node: AstNode) {
         }
         varBindings = previous;  // 恢复上层作用域
       } else {
-        throw new Error("Scope stack underflow: too many closing braces");
+        console.error("Scope stack underflow: too many closing braces");
       }
     }
   }
@@ -1738,8 +1932,16 @@ function secondPass(filePath: string, node: AstNode) {
   function walk(node: AstNode) {
     const id = node.varId;
     if (id === undefined) throw new Error("Missing varId in second pass");
-    syntaxNodes[id] = { kind: node.kind, text: node.text, file: filePath, position: node.position, offset: node.offset, context: node.parent?.text 
-};
+    meta.file.set(id, filePath);
+    meta.pos.set(id, node.position);
+    meta.offset.set(id, node.offset);
+    meta.kind.set(id, node.kind);
+    if (node.text) {
+      meta.text.set(id, node.text);
+      meta.context.set(id, node.parent?.text ?? node.text)
+    }
+    // syntaxNodes[id] = { kind: node.kind, text: node.text, file: filePath, position: node.position, offset: node.offset, context: node.parent?.text 
+// };
     // 处理先序遍历
     let handler = preOrderHandlers[node.kind];
     if (handler) handler(node);
@@ -1804,443 +2006,443 @@ function resolveImportPath(currentFilePath: string, importSpecifier: string): st
   }
 }
 
-// 求解类型图
-function deriveVariableTypes() {
-  for (let [kind, a, b] of allConstraints) {
-    a = find(Number(a));
-    if (kind === "hasType") {
-      if (syntaxNodes[a].kind === "Identifier") {
-        graph.set(a, graph.get(a) ?? new Map());
-      }
-      setTypeVar(a, b); source.set(a, new Map());
-    } else if (kind !== "sameID") {
-      if (kind === "funcToArg") {
-        const func = find(Math.floor(b / 1000));
-        const idx = b % 1000;
-        // if (!funcParam[func]?.[idx]) {
-        //   console.log(`Can not find Correspond param #${idx} of function ${syntaxNodes[func]?.text!}[${func}]`);
-        //   continue;
-        // } else {
-        //   console.log(`Find Correspond param #${idx} of function ${syntaxNodes[func]?.text!}[${func}]`);
-        // }
-        a = a * 1000 + idx;
-        b = func;
-      }
-      b = find(Number(b));
-      if (b === a) continue; // 避免自引用
-      graph.set(b, graph.get(b) ?? new Map()); graph.get(b)!.set(a, kind);
-      source.set(a, source.get(a) ?? new Map()); source.get(a)!.set(b, UNKNOWN);
-      if (kind === "setParamType" || kind === "initProperty") {
-        setTypeVar(b, typeSet.get(b) ?? UNKNOWN);
-      }
-    }
-  }
+// // 求解类型图
+// function deriveVariableTypes() {
+//   for (let [kind, a, b] of allConstraints) {
+//     a = find(Number(a));
+//     if (kind === "hasType") {
+//       if (meta.kind.get(a) === "Identifier") {
+//         graph.set(a, graph.get(a) ?? new Map());
+//       }
+//       setTypeVar(a, b); source.set(a, new Map());
+//     } else if (kind !== "sameID") {
+//       if (kind === "funcToArg") {
+//         const func = find(Math.floor(b / 1000));
+//         const idx = b % 1000;
+//         // if (!funcParam[func]?.[idx]) {
+//         //   console.log(`Can not find Correspond param #${idx} of function ${syntaxNodes[func]?.text!}[${func}]`);
+//         //   continue;
+//         // } else {
+//         //   console.log(`Find Correspond param #${idx} of function ${syntaxNodes[func]?.text!}[${func}]`);
+//         // }
+//         a = a * 1000 + idx;
+//         b = func;
+//       }
+//       b = find(Number(b));
+//       if (b === a) continue; // 避免自引用
+//       graph.set(b, graph.get(b) ?? new Map()); graph.get(b)!.set(a, kind);
+//       source.set(a, source.get(a) ?? new Map()); source.get(a)!.set(b, UNKNOWN);
+//       if (kind === "setParamType" || kind === "initProperty") {
+//         setTypeVar(b, typeSet.get(b) ?? UNKNOWN);
+//       }
+//     }
+//   }
 
-  worklist = Array.from(graph.keys()).filter(n => typeSet.get(n) !== undefined);
-  while (worklist.length > 0) {
-    const cur = worklist.pop()!;
-    cnt[cur] = (cnt[cur] ?? 0) + 1;
-    if (cnt[cur] > 20000) {
-      console.warn(`Node ${cur} has too many iterations (${cnt[cur]}), possible infinite loop`);
-      break;
-    }
-    if (LOG_TYPE_FLOW) {
-      console.log(`Processing node ${cur} (${syntaxNodes[cur]?.text}) with ${cnt[cur]} iterations, worklist size: ${worklist.length}, node edges ${graph.get(cur)?.size ?? 0}`);
+//   worklist = Array.from(graph.keys()).filter(n => typeSet.get(n) !== undefined);
+//   while (worklist.length > 0) {
+//     const cur = worklist.pop()!;
+//     cnt[cur] = (cnt[cur] ?? 0) + 1;
+//     if (cnt[cur] > 20000) {
+//       console.warn(`Node ${cur} has too many iterations (${cnt[cur]}), possible infinite loop`);
+//       break;
+//     }
+//     if (LOG_TYPE_FLOW) {
+//       console.log(`Processing node ${cur} (${meta.text.get(cur)}) with ${cnt[cur]} iterations, worklist size: ${worklist.length}, node edges ${graph.get(cur)?.size ?? 0}`);
 
-      // 输出 Types
-      if (typeSet.get(cur)) {
-        console.log(`  Type (raw): ${typeSet.get(cur)}`);
-        console.log(`  Type: ${JSON.stringify(typeNodes.get(typeSet.get(cur)!))}`);
-      } else {
-        console.log(`  Type: no types`);
-      }
-    }
+//       // 输出 Types
+//       if (typeSet.get(cur)) {
+//         console.log(`  Type (raw): ${typeSet.get(cur)}`);
+//         console.log(`  Type: ${JSON.stringify(typeNodes.get(typeSet.get(cur)!))}`);
+//       } else {
+//         console.log(`  Type: no types`);
+//       }
+//     }
 
-    let tSet = typeSet.get(cur);
-    if(!tSet) {
-      console.warn(`node ${cur} with no type`);
-      continue;
-    }
-    const edges = graph.get(cur);
-    if (!edges) continue;
-    for (const next of edges.keys()) {
-      const nSet = typeSet.get(next);
-      const edgeKind = graph.get(cur)!.get(next)!;
-      if (LOG_TYPE_FLOW) {
-        console.log(`  Processing edge ${cur} -> ${next} of kind ${edgeKind}, merge difficulty: ${source.get(next)?.size ?? 0}`);
-      }
+//     let tSet = typeSet.get(cur);
+//     if(!tSet) {
+//       console.warn(`node ${cur} with no type`);
+//       continue;
+//     }
+//     const edges = graph.get(cur);
+//     if (!edges) continue;
+//     for (const next of edges.keys()) {
+//       const nSet = typeSet.get(next);
+//       const edgeKind = graph.get(cur)!.get(next)!;
+//       if (LOG_TYPE_FLOW) {
+//         console.log(`  Processing edge ${cur} -> ${next} of kind ${edgeKind}, merge difficulty: ${source.get(next)?.size ?? 0}`);
+//       }
 
-      //  数据流处理
-      if (edgeKind === "sameType" || edgeKind === "ArgToParam" || edgeKind === "annotation") {
-        if (edgeKind === "annotation" && syntaxNodes[cur].file && !path.relative(process.cwd(), syntaxNodes[cur].file).split(path.sep).includes("sdk")) continue;
-        // 如果是同类型
-        source.get(next)!.set(cur, tSet);
-        setTypeVar(next, mergeBranches(next));
-      }
-      else if (edgeKind === "makeArray") {
-        // 如果是数组类型，添加元素类型
-        if (nSet === undefined) {
-          console.warn(`makeArray on undefined type in edge ${cur}->${next}`);
-        } else {
-          const typeNode = typeNodes.get(nSet);
-          if (typeNode === undefined || typeNode.kind !== "array") {
-            console.warn(`makeArray on non-array type ${printType(nSet)} in edge ${cur}->${next}`);
-            continue;
-          }
-          source.get(next)!.set(cur, tSet);
-          const id = newTypeNode({ kind: "array", elementType: mergeBranches(next) });
-          setTypeVar(next, id);
-        }
-      }
-      else if (edgeKind === "takeProperty") {
-        // 如果是取属性，添加属性类型
-        if (!syntaxNodes[next]?.text) {
-          console.error(`fail to takeProperty because text size too short`);
-          continue;
-        } else {
-          const propName = syntaxNodes[next]?.text.split(".").pop();
-          const typeNode = typeNodes.get(tSet);
-          if (propName && typeNode && typeNode.kind == "object" && propName in typeNode.properties) {
-            source.get(next)?.set(cur, typeNode.properties[propName]);
-            if (LOG_TYPE_FLOW)
-              console.log(`takeProperty[object] ${typeNode.properties[propName]} for ${propName} in edge ${cur}->${next}`);
-          } else if (propName && typeNode && typeNode.kind == "enum" && propName in typeNode.members) {
-            source.get(next)?.set(cur, typeNode.members[propName]);
-            if (LOG_TYPE_FLOW)
-              console.log(`takeProperty[enum] ${typeNode.members[propName]} for ${propName} in edge ${cur}->${next}`);
-          } else if (typeNode && typeNode.kind == "union") {
-            let lst = [];
-            for (const subtype of typeNode.types) {
-              const subtypeNode = typeNodes.get(subtype);
-              if (propName && subtypeNode && subtypeNode.kind == "object" && propName in subtypeNode.properties) {
-                lst.push(subtypeNode.properties[propName]);
-                if (LOG_TYPE_FLOW)
-                  console.log(`takeProperty[union-object] ${subtypeNode.properties[propName]} for ${propName} in edge ${cur}->${next}`);
-              } else if (propName && subtypeNode && subtypeNode.kind == "enum" && propName in subtypeNode.members) {
-                lst.push(subtypeNode.members[propName]);
-                if (LOG_TYPE_FLOW)
-                  console.log(`takeProperty[union-enum] ${subtypeNode.members[propName]} for ${propName} in edge ${cur}->${next}`);
-              } else {
-                lst.push(UNDEFINED);
-              }
-            }
-            if (lst.length > 0) {
-              source.get(next)!.set(cur, mergeTypes(lst));
-            } else {
-              console.warn(`Unexpected takeProperty when type ${tSet} : ${printType(tSet)} has no object or enum subtype with property ${propName} in edge ${cur}->${next}`);
-            }
-          } else {
-            source.get(next)!.set(cur, UNDEFINED);
-          }
-        }
-        setTypeVar(next, mergeBranches(next));
-      }
-      else if (edgeKind === "elementAccess") {
-        // 取数组成员
-        const typeNode = typeNodes.get(tSet);
-        if (typeNode?.kind === "array") {
-          source.get(next)!.set(cur, mergeTypes([typeNode.elementType, UNDEFINED]));
-        } else if (typeNode?.kind === "primitive" && typeNode.name === "string") {
-          source.get(next)!.set(cur, mergeTypes([STRING, UNDEFINED]));
-        } else if (typeNode?.kind === "object") {
-          let propName = syntaxNodes[next]?.text?.split("[").pop()?.split("]")[0];
-          // 只判断字符串或者数字属性
-          if (propName && (propName.startsWith('"') && propName.endsWith('"') || propName.startsWith("'") && propName.endsWith("'") || /^\d+$/.test(propName))) {
-            const cleanPropName = (propName.startsWith('"') && propName.endsWith('"') || propName.startsWith("'") && propName.endsWith("'")) ? propName.slice(1, -1) : propName;
-            const propType = typeNode.properties[cleanPropName];
-            if (propType) {
-              source.get(next)!.set(cur, propType);
-              if (LOG_TYPE_FLOW)
-                console.log(`elementAccess[object] ${propType} for ${cleanPropName} in edge ${cur}->${next}`);
-            }
-          }
-        }
-        else if (typeNode?.kind === "union") {
-          let lst = [];
-          for (const subtype of typeNode.types) {
-            const subtypeNode = typeNodes.get(subtype);
-            if (subtypeNode?.kind === "array") {
-              lst.push(subtypeNode.elementType);
-              lst.push(UNDEFINED);
-            } else if (subtypeNode?.kind === "primitive" && subtypeNode.name === "string") {
-              lst.push(mergeTypes([STRING, UNDEFINED]));
-            } else if (subtypeNode?.kind === "object") {
-              const propName = syntaxNodes[cur]?.text?.split("[").pop()?.split("]")[0];
-              if (propName && (propName.startsWith('"') && propName.endsWith('"') || propName.startsWith("'") && propName.endsWith("'"))) {
-                const cleanPropName = propName.slice(1, -1);
-                const propType = subtypeNode.properties[cleanPropName];
-                if (propType) {
-                  lst.push(propType);
-                  if (LOG_TYPE_FLOW)
-                    console.log(`elementAccess[union-object] ${propType} for ${cleanPropName} in edge ${cur}->${next}`);
-                }
-              }
-            }
-          }
-          if (lst.length > 0) {
-            source.get(next)!.set(cur, mergeTypes(lst));
-          } else {
-            console.warn(`Unexpected elementAccess when type ${tSet} : ${printType(tSet)} has no array or object subtype in edge ${cur}->${next}`);
-          }
-        } else {
-          console.warn(`Unexpected elementAccess when type ${tSet} : ${printType(tSet)} is not array or object in edge ${cur}->${next}`);
-        }
-        setTypeVar(next, mergeBranches(next));
-      }
-      else if (edgeKind === "funcCall") {
-        // 如果是函数调用，添加函数返回类型
-        const typeNode = typeNodes.get(tSet);
-        if (typeNode?.kind === "function") {
-          source.get(next)!.set(cur, typeNode.returnType);
-        } else {
-          console.warn(`Unexpected funcCall when type ${tSet} : ${printType(tSet)} is not function in edge ${cur}->${next}`);
-        }
-        setTypeVar(next, mergeBranches(next));
-      }
+//       //  数据流处理
+//       if (edgeKind === "sameType" || edgeKind === "ArgToParam" || edgeKind === "annotation") {
+//         if (edgeKind === "annotation" && syntaxNodes[cur].file && !path.relative(process.cwd(), syntaxNodes[cur].file).split(path.sep).includes("sdk")) continue;
+//         // 如果是同类型
+//         source.get(next)!.set(cur, tSet);
+//         setTypeVar(next, mergeBranches(next));
+//       }
+//       else if (edgeKind === "makeArray") {
+//         // 如果是数组类型，添加元素类型
+//         if (nSet === undefined) {
+//           console.warn(`makeArray on undefined type in edge ${cur}->${next}`);
+//         } else {
+//           const typeNode = typeNodes.get(nSet);
+//           if (typeNode === undefined || typeNode.kind !== "array") {
+//             console.warn(`makeArray on non-array type ${printType(nSet)} in edge ${cur}->${next}`);
+//             continue;
+//           }
+//           source.get(next)!.set(cur, tSet);
+//           const id = newTypeNode({ kind: "array", elementType: mergeBranches(next) });
+//           setTypeVar(next, id);
+//         }
+//       }
+//       else if (edgeKind === "takeProperty") {
+//         // 如果是取属性，添加属性类型
+//         if (!syntaxNodes[next]?.text) {
+//           console.error(`fail to takeProperty because text size too short`);
+//           continue;
+//         } else {
+//           const propName = syntaxNodes[next]?.text.split(".").pop();
+//           const typeNode = typeNodes.get(tSet);
+//           if (propName && typeNode && typeNode.kind == "object" && propName in typeNode.properties) {
+//             source.get(next)?.set(cur, typeNode.properties[propName]);
+//             if (LOG_TYPE_FLOW)
+//               console.log(`takeProperty[object] ${typeNode.properties[propName]} for ${propName} in edge ${cur}->${next}`);
+//           } else if (propName && typeNode && typeNode.kind == "enum" && propName in typeNode.members) {
+//             source.get(next)?.set(cur, typeNode.members[propName]);
+//             if (LOG_TYPE_FLOW)
+//               console.log(`takeProperty[enum] ${typeNode.members[propName]} for ${propName} in edge ${cur}->${next}`);
+//           } else if (typeNode && typeNode.kind == "union") {
+//             let lst = [];
+//             for (const subtype of typeNode.types) {
+//               const subtypeNode = typeNodes.get(subtype);
+//               if (propName && subtypeNode && subtypeNode.kind == "object" && propName in subtypeNode.properties) {
+//                 lst.push(subtypeNode.properties[propName]);
+//                 if (LOG_TYPE_FLOW)
+//                   console.log(`takeProperty[union-object] ${subtypeNode.properties[propName]} for ${propName} in edge ${cur}->${next}`);
+//               } else if (propName && subtypeNode && subtypeNode.kind == "enum" && propName in subtypeNode.members) {
+//                 lst.push(subtypeNode.members[propName]);
+//                 if (LOG_TYPE_FLOW)
+//                   console.log(`takeProperty[union-enum] ${subtypeNode.members[propName]} for ${propName} in edge ${cur}->${next}`);
+//               } else {
+//                 lst.push(UNDEFINED);
+//               }
+//             }
+//             if (lst.length > 0) {
+//               source.get(next)!.set(cur, mergeTypes(lst));
+//             } else {
+//               console.warn(`Unexpected takeProperty when type ${tSet} : ${printType(tSet)} has no object or enum subtype with property ${propName} in edge ${cur}->${next}`);
+//             }
+//           } else {
+//             source.get(next)!.set(cur, UNDEFINED);
+//           }
+//         }
+//         setTypeVar(next, mergeBranches(next));
+//       }
+//       else if (edgeKind === "elementAccess") {
+//         // 取数组成员
+//         const typeNode = typeNodes.get(tSet);
+//         if (typeNode?.kind === "array") {
+//           source.get(next)!.set(cur, mergeTypes([typeNode.elementType, UNDEFINED]));
+//         } else if (typeNode?.kind === "primitive" && typeNode.name === "string") {
+//           source.get(next)!.set(cur, mergeTypes([STRING, UNDEFINED]));
+//         } else if (typeNode?.kind === "object") {
+//           let propName = syntaxNodes[next]?.text?.split("[").pop()?.split("]")[0];
+//           // 只判断字符串或者数字属性
+//           if (propName && (propName.startsWith('"') && propName.endsWith('"') || propName.startsWith("'") && propName.endsWith("'") || /^\d+$/.test(propName))) {
+//             const cleanPropName = (propName.startsWith('"') && propName.endsWith('"') || propName.startsWith("'") && propName.endsWith("'")) ? propName.slice(1, -1) : propName;
+//             const propType = typeNode.properties[cleanPropName];
+//             if (propType) {
+//               source.get(next)!.set(cur, propType);
+//               if (LOG_TYPE_FLOW)
+//                 console.log(`elementAccess[object] ${propType} for ${cleanPropName} in edge ${cur}->${next}`);
+//             }
+//           }
+//         }
+//         else if (typeNode?.kind === "union") {
+//           let lst = [];
+//           for (const subtype of typeNode.types) {
+//             const subtypeNode = typeNodes.get(subtype);
+//             if (subtypeNode?.kind === "array") {
+//               lst.push(subtypeNode.elementType);
+//               lst.push(UNDEFINED);
+//             } else if (subtypeNode?.kind === "primitive" && subtypeNode.name === "string") {
+//               lst.push(mergeTypes([STRING, UNDEFINED]));
+//             } else if (subtypeNode?.kind === "object") {
+//               const propName = syntaxNodes[cur]?.text?.split("[").pop()?.split("]")[0];
+//               if (propName && (propName.startsWith('"') && propName.endsWith('"') || propName.startsWith("'") && propName.endsWith("'"))) {
+//                 const cleanPropName = propName.slice(1, -1);
+//                 const propType = subtypeNode.properties[cleanPropName];
+//                 if (propType) {
+//                   lst.push(propType);
+//                   if (LOG_TYPE_FLOW)
+//                     console.log(`elementAccess[union-object] ${propType} for ${cleanPropName} in edge ${cur}->${next}`);
+//                 }
+//               }
+//             }
+//           }
+//           if (lst.length > 0) {
+//             source.get(next)!.set(cur, mergeTypes(lst));
+//           } else {
+//             console.warn(`Unexpected elementAccess when type ${tSet} : ${printType(tSet)} has no array or object subtype in edge ${cur}->${next}`);
+//           }
+//         } else {
+//           console.warn(`Unexpected elementAccess when type ${tSet} : ${printType(tSet)} is not array or object in edge ${cur}->${next}`);
+//         }
+//         setTypeVar(next, mergeBranches(next));
+//       }
+//       else if (edgeKind === "funcCall") {
+//         // 如果是函数调用，添加函数返回类型
+//         const typeNode = typeNodes.get(tSet);
+//         if (typeNode?.kind === "function") {
+//           source.get(next)!.set(cur, typeNode.returnType);
+//         } else {
+//           console.warn(`Unexpected funcCall when type ${tSet} : ${printType(tSet)} is not function in edge ${cur}->${next}`);
+//         }
+//         setTypeVar(next, mergeBranches(next));
+//       }
         
 
 
 
-      // 控制流处理
-      else if(edgeKind === "funcToArg") {
-        const ty = typeNodes.get(tSet);
-        const arg = find(Math.floor(next / 1000));
-        const idx = next % 1000;
-        let func;
-        if (!ty) {
-          console.error(`error: function Node ${syntaxNodes[cur].text}[${cur}] with null type!`);
-          continue;
-        }
-        if (ty.kind === "union") {
-          let f = ty.types.find(n => typeNodes.get(n)!.kind === "function");
-          if (f) {
-            const typeNode = typeNodes.get(f)!;
-            if (typeNode.kind === "function") {
-              func = typeNode.id;
-              console.warn(`Unexpected Union type of function ${syntaxNodes[cur].text!}[${cur}], use initial node ${func}`);
-            } else {
-              console.error(`error: function Node ${syntaxNodes[cur].text}[${cur}] without function type!`);
-              continue;
-            }
-          }
-        }
-        if (ty.kind === "function") {
-          func = ty.id;
-        }
-        if (!func) {
-          console.error(`error: function Node ${syntaxNodes[cur].text}[${cur}] without function type!`);
-          continue;
-        }
-        const param = funcParam[func]?.[idx];
-        if (!param) { 
-          console.log(`Can not find Correspond param #${idx} of function ${syntaxNodes[func]?.text!}[${func}]`);
-          continue;
-        }
+//       // 控制流处理
+//       else if(edgeKind === "funcToArg") {
+//         const ty = typeNodes.get(tSet);
+//         const arg = find(Math.floor(next / 1000));
+//         const idx = next % 1000;
+//         let func;
+//         if (!ty) {
+//           console.error(`error: function Node ${syntaxNodes[cur].text}[${cur}] with null type!`);
+//           continue;
+//         }
+//         if (ty.kind === "union") {
+//           let f = ty.types.find(n => typeNodes.get(n)!.kind === "function");
+//           if (f) {
+//             const typeNode = typeNodes.get(f)!;
+//             if (typeNode.kind === "function") {
+//               func = typeNode.id;
+//               console.warn(`Unexpected Union type of function ${syntaxNodes[cur].text!}[${cur}], use initial node ${func}`);
+//             } else {
+//               console.error(`error: function Node ${syntaxNodes[cur].text}[${cur}] without function type!`);
+//               continue;
+//             }
+//           }
+//         }
+//         if (ty.kind === "function") {
+//           func = ty.id;
+//         }
+//         if (!func) {
+//           console.error(`error: function Node ${syntaxNodes[cur].text}[${cur}] without function type!`);
+//           continue;
+//         }
+//         const param = funcParam[func]?.[idx];
+//         if (!param) { 
+//           console.log(`Can not find Correspond param #${idx} of function ${syntaxNodes[func]?.text!}[${func}]`);
+//           continue;
+//         }
 
-        // 擦除边，构建新边（默认function的id不会变）
-        graph.get(cur)!.delete(next);
-        graph.set(arg, graph.get(arg) ?? new Map());
-        graph.get(arg)!.set(param, "ArgToParam");
-        source.set(param, source.get(param) ?? new Map());
-        source.get(param)!.set(arg, UNKNOWN);
-        worklist.push(arg);
-        continue;
-      }
-      else if (edgeKind === "initProperty") {
-        // 如果是设置属性，添加属性类型
-        const propName = syntaxNodes[cur]?.text;
-
-
-        if (nSet === undefined) {
-          console.warn(`initProperty on undefined type in edge ${cur}->${next}`);
-          continue;
-        }
-        const typeNode = typeNodes.get(nSet);
-        if (typeNode === undefined || typeNode.kind !== "object") {
-          console.warn(`initProperty on non-object type ${printType(nSet)} in edge ${cur}->${next}`);
-          continue;
-        }
-        if (!propName) {
-          console.warn(`initProperty with no propName in edge ${cur}->${next}`);
-          continue;
-        }
+//         // 擦除边，构建新边（默认function的id不会变）
+//         graph.get(cur)!.delete(next);
+//         graph.set(arg, graph.get(arg) ?? new Map());
+//         graph.get(arg)!.set(param, "ArgToParam");
+//         source.set(param, source.get(param) ?? new Map());
+//         source.get(param)!.set(arg, UNKNOWN);
+//         worklist.push(arg);
+//         continue;
+//       }
+//       else if (edgeKind === "initProperty") {
+//         // 如果是设置属性，添加属性类型
+//         const propName = syntaxNodes[cur]?.text;
 
 
-        const id = newTypeNode({ kind: "object", name: typeNode.name, id: typeNode.id, properties: makePurePropertiesCopy(typeNode.properties, propName, tSet)});
-        setTypeVar(next, id);
-      }
-      else if (edgeKind === "setProperty") {
-        // 如果是设置属性，添加属性类型
-        const propName = syntaxNodes[cur].text?.split(".").pop();
-
-        if (!propName) {
-          console.warn(`setProperty with no propName in edge ${cur}->${next}`);
-          continue;
-        }
-
-        if (nSet === undefined) {
-          console.warn(`setProperty on undefined type in edge ${cur}->${next}`);
-          continue;
-        }
-
-        const typeNode = typeNodes.get(nSet);
-        if (typeNode === undefined) continue;
-
-        if (typeNode.kind === "object") {
-          const dstty = typeNode?.kind === "object" ? typeNode.properties[propName!] ? mergeTypes([typeNode.properties[propName!], tSet]) : tSet : tSet;
-          const id = newTypeNode({ kind: "object", name: typeNode.name, id: typeNode.id, properties: makePurePropertiesCopy(typeNode.properties, propName!, dstty) });
-          setTypeVar(next, id);
-        } else if (typeNode.kind === "union") {
-          let updated = false;
-          const newTypes = typeNode.types.map(t => {
-            const tynd = typeNodes.get(t);
-            if (tynd?.kind === "object") {
-              const dstty = tynd.properties[propName!] ? mergeTypes([tynd.properties[propName!], tSet]) : tSet;
-              const id = newTypeNode({ kind: "object", name: tynd.name, id: tynd.id, properties: makePurePropertiesCopy(tynd.properties, propName!, dstty) });
-              updated = true;
-              return id;
-            } else {
-              return t;
-            }
-          });
-          if (updated) {
-            setTypeVar(next, newTypeNode({ kind: "union", types: newTypes }));
-          } else {
-            console.warn(`setProperty on union type without object member ${printType(nSet)} in edge ${cur}->${next}`);
-          }
-        }
-      }
-      else if (edgeKind === "setElement") {
-        // 取a[b]中的b
-        const propName = syntaxNodes[cur].text?.split("[").pop()?.split("]").shift();
-        if (!propName) {
-          console.warn(`setElement with no propName in edge ${cur}->${next}`);
-          continue;
-        }
-
-        if (nSet === undefined) {
-          console.warn(`setElement on undefined type in edge ${cur}->${next}`);
-          continue;
-        }
-
-        const typeNode = typeNodes.get(nSet);
-        if (typeNode === undefined) continue;
-
-        if (typeNode.kind === "object") {
-          if (propName.startsWith('"') && propName.endsWith('"') || propName.startsWith("'") && propName.endsWith("'")) {
-            const cleanPropName = propName.slice(1, -1);
-            const dstty = typeNode?.kind === "object" ? typeNode.properties[cleanPropName] ? mergeTypes([typeNode.properties[cleanPropName], tSet]) : tSet : tSet;
-            const id = newTypeNode({ kind: "object", name: typeNode.name, id: typeNode.id, properties: makePurePropertiesCopy(typeNode.properties, cleanPropName, dstty) });
-            setTypeVar(next, id);
-          }
-
-        } else if (typeNode.kind === "array") {
-          const idx = Number(propName);
-          if (isNaN(idx)) {
-            console.warn(`setElement with non-numeric index ${propName} in edge ${cur}->${next}`);
-            continue;
-          }
-          const dstty = mergeTypes([typeNode.elementType, tSet]);
-          const id = newTypeNode({ kind: "array", elementType: dstty });
-          setTypeVar(next, id);
-        } else if (typeNode.kind === "union") {
-          let updated = false;
-          const newTypes = typeNode.types.map(t => {
-            const tynd = typeNodes.get(t);
-            if (tynd?.kind === "object") {
-              const dstty = tynd.properties[propName!] ? mergeTypes([tynd.properties[propName!], tSet]) : tSet;
-              const id = newTypeNode({ kind: "object", name: tynd.name, id: tynd.id, properties: makePurePropertiesCopy(tynd.properties, propName!, dstty) });
-              updated = true;
-              return id;
-            } else if (tynd?.kind === "array") {
-              const idx = Number(propName);
-              if (isNaN(idx)) {
-                console.warn(`setElement with non-numeric index ${propName} in edge ${cur}->${next}`);
-                return t;
-              }
-              const dstty = mergeTypes([tynd.elementType, tSet]);
-              const id = newTypeNode({ kind: "array", elementType: dstty });
-              updated = true;
-              return id;
-            } else {
-              return t;
-            }
-          });
-          if (updated) {
-            setTypeVar(next, newTypeNode({ kind: "union", types: newTypes }));
-          } else {
-            console.warn(`setElement on union type without object or array member ${printType(nSet)} in edge ${cur}->${next}`);
-          }
-        }
-      }
-      else if (edgeKind === "setParamType") {
-        // 如果是参数类型，添加参数类型
-        const paramName = syntaxNodes[cur]?.text;
+//         if (nSet === undefined) {
+//           console.warn(`initProperty on undefined type in edge ${cur}->${next}`);
+//           continue;
+//         }
+//         const typeNode = typeNodes.get(nSet);
+//         if (typeNode === undefined || typeNode.kind !== "object") {
+//           console.warn(`initProperty on non-object type ${printType(nSet)} in edge ${cur}->${next}`);
+//           continue;
+//         }
+//         if (!propName) {
+//           console.warn(`initProperty with no propName in edge ${cur}->${next}`);
+//           continue;
+//         }
 
 
-        if (nSet === undefined) {
-          console.warn(`setParamType on undefined type in edge ${cur}->${next}`);
-          continue;
-        }
-        const typeNode = typeNodes.get(nSet);
-        if (typeNode === undefined || typeNode.kind !== "function") {
-          console.warn(`setParamType on non-function type ${printType(nSet)} in edge ${cur}->${next}`);
-          continue;
-        }
-        if (!paramName) {
-          console.warn(`Parameter name not found in edge ${cur}->${next}`);
-          continue;
-        }
+//         const id = newTypeNode({ kind: "object", name: typeNode.name, id: typeNode.id, properties: makePurePropertiesCopy(typeNode.properties, propName, tSet)});
+//         setTypeVar(next, id);
+//       }
+//       else if (edgeKind === "setProperty") {
+//         // 如果是设置属性，添加属性类型
+//         const propName = syntaxNodes[cur].text?.split(".").pop();
+
+//         if (!propName) {
+//           console.warn(`setProperty with no propName in edge ${cur}->${next}`);
+//           continue;
+//         }
+
+//         if (nSet === undefined) {
+//           console.warn(`setProperty on undefined type in edge ${cur}->${next}`);
+//           continue;
+//         }
+
+//         const typeNode = typeNodes.get(nSet);
+//         if (typeNode === undefined) continue;
+
+//         if (typeNode.kind === "object") {
+//           const dstty = typeNode?.kind === "object" ? typeNode.properties[propName!] ? mergeTypes([typeNode.properties[propName!], tSet]) : tSet : tSet;
+//           const id = newTypeNode({ kind: "object", name: typeNode.name, id: typeNode.id, properties: makePurePropertiesCopy(typeNode.properties, propName!, dstty) });
+//           setTypeVar(next, id);
+//         } else if (typeNode.kind === "union") {
+//           let updated = false;
+//           const newTypes = typeNode.types.map(t => {
+//             const tynd = typeNodes.get(t);
+//             if (tynd?.kind === "object") {
+//               const dstty = tynd.properties[propName!] ? mergeTypes([tynd.properties[propName!], tSet]) : tSet;
+//               const id = newTypeNode({ kind: "object", name: tynd.name, id: tynd.id, properties: makePurePropertiesCopy(tynd.properties, propName!, dstty) });
+//               updated = true;
+//               return id;
+//             } else {
+//               return t;
+//             }
+//           });
+//           if (updated) {
+//             setTypeVar(next, newTypeNode({ kind: "union", types: newTypes }));
+//           } else {
+//             console.warn(`setProperty on union type without object member ${printType(nSet)} in edge ${cur}->${next}`);
+//           }
+//         }
+//       }
+//       else if (edgeKind === "setElement") {
+//         // 取a[b]中的b
+//         const propName = syntaxNodes[cur].text?.split("[").pop()?.split("]").shift();
+//         if (!propName) {
+//           console.warn(`setElement with no propName in edge ${cur}->${next}`);
+//           continue;
+//         }
+
+//         if (nSet === undefined) {
+//           console.warn(`setElement on undefined type in edge ${cur}->${next}`);
+//           continue;
+//         }
+
+//         const typeNode = typeNodes.get(nSet);
+//         if (typeNode === undefined) continue;
+
+//         if (typeNode.kind === "object") {
+//           if (propName.startsWith('"') && propName.endsWith('"') || propName.startsWith("'") && propName.endsWith("'")) {
+//             const cleanPropName = propName.slice(1, -1);
+//             const dstty = typeNode?.kind === "object" ? typeNode.properties[cleanPropName] ? mergeTypes([typeNode.properties[cleanPropName], tSet]) : tSet : tSet;
+//             const id = newTypeNode({ kind: "object", name: typeNode.name, id: typeNode.id, properties: makePurePropertiesCopy(typeNode.properties, cleanPropName, dstty) });
+//             setTypeVar(next, id);
+//           }
+
+//         } else if (typeNode.kind === "array") {
+//           const idx = Number(propName);
+//           if (isNaN(idx)) {
+//             console.warn(`setElement with non-numeric index ${propName} in edge ${cur}->${next}`);
+//             continue;
+//           }
+//           const dstty = mergeTypes([typeNode.elementType, tSet]);
+//           const id = newTypeNode({ kind: "array", elementType: dstty });
+//           setTypeVar(next, id);
+//         } else if (typeNode.kind === "union") {
+//           let updated = false;
+//           const newTypes = typeNode.types.map(t => {
+//             const tynd = typeNodes.get(t);
+//             if (tynd?.kind === "object") {
+//               const dstty = tynd.properties[propName!] ? mergeTypes([tynd.properties[propName!], tSet]) : tSet;
+//               const id = newTypeNode({ kind: "object", name: tynd.name, id: tynd.id, properties: makePurePropertiesCopy(tynd.properties, propName!, dstty) });
+//               updated = true;
+//               return id;
+//             } else if (tynd?.kind === "array") {
+//               const idx = Number(propName);
+//               if (isNaN(idx)) {
+//                 console.warn(`setElement with non-numeric index ${propName} in edge ${cur}->${next}`);
+//                 return t;
+//               }
+//               const dstty = mergeTypes([tynd.elementType, tSet]);
+//               const id = newTypeNode({ kind: "array", elementType: dstty });
+//               updated = true;
+//               return id;
+//             } else {
+//               return t;
+//             }
+//           });
+//           if (updated) {
+//             setTypeVar(next, newTypeNode({ kind: "union", types: newTypes }));
+//           } else {
+//             console.warn(`setElement on union type without object or array member ${printType(nSet)} in edge ${cur}->${next}`);
+//           }
+//         }
+//       }
+//       else if (edgeKind === "setParamType") {
+//         // 如果是参数类型，添加参数类型
+//         const paramName = syntaxNodes[cur]?.text;
 
 
-        // source[next][cur] = tSet;
-        // let tylist : number[]  = [];
-        // for(const srcStr in source[next]) {
-        //   const src = Number(srcStr);
-        //   const curParamName = syntaxNodes[src]?.text;
-        //   if (curParamName !== paramName) continue;
-        //   tylist.push(source[next][src]);
-        // }
-        setTypeVar(next, newTypeNode({ kind: "function", name: typeNode.name, id: typeNode.id, params: [...typeNode.params.filter(pa => pa.name !== paramName), {name: paramName, type: /* mergeTypes(tylist) */tSet}], returnType: typeNode.returnType }));
-      }
-      else if (edgeKind === "returnType" || edgeKind === "returnAnnotation") {
-        if (edgeKind === "returnAnnotation" && syntaxNodes[cur].file && !path.relative(process.cwd(), syntaxNodes[cur].file).split(path.sep).includes("sdk")) continue;
-        // 如果是返回类型，添加返回类型
-        if (nSet === undefined) {
-          console.warn(`returnType or returnAnnotation on undefined type in edge ${cur}->${next}`);
-          continue;
-        }
-        const typeNode = typeNodes.get(nSet);
-        if (typeNode === undefined || typeNode.kind !== "function") {
-          console.warn(`returnType or returnAnnotation on non-function type ${printType(nSet)} in edge ${cur}->${next}`);
-          continue;
-        }
-
-        source.get(next)!.set(cur, tSet);
-        setTypeVar(next, newTypeNode({ kind: "function", name: typeNode.name, id: typeNode.id, params: typeNode.params, returnType: mergeBranches(next, ["returnType"/* , "returnAnnotation" */]) }));
-      }
+//         if (nSet === undefined) {
+//           console.warn(`setParamType on undefined type in edge ${cur}->${next}`);
+//           continue;
+//         }
+//         const typeNode = typeNodes.get(nSet);
+//         if (typeNode === undefined || typeNode.kind !== "function") {
+//           console.warn(`setParamType on non-function type ${printType(nSet)} in edge ${cur}->${next}`);
+//           continue;
+//         }
+//         if (!paramName) {
+//           console.warn(`Parameter name not found in edge ${cur}->${next}`);
+//           continue;
+//         }
 
 
+//         // source[next][cur] = tSet;
+//         // let tylist : number[]  = [];
+//         // for(const srcStr in source[next]) {
+//         //   const src = Number(srcStr);
+//         //   const curParamName = syntaxNodes[src]?.text;
+//         //   if (curParamName !== paramName) continue;
+//         //   tylist.push(source[next][src]);
+//         // }
+//         setTypeVar(next, newTypeNode({ kind: "function", name: typeNode.name, id: typeNode.id, params: [...typeNode.params.filter(pa => pa.name !== paramName), {name: paramName, type: /* mergeTypes(tylist) */tSet}], returnType: typeNode.returnType }));
+//       }
+//       else if (edgeKind === "returnType" || edgeKind === "returnAnnotation") {
+//         if (edgeKind === "returnAnnotation" && syntaxNodes[cur].file && !path.relative(process.cwd(), syntaxNodes[cur].file).split(path.sep).includes("sdk")) continue;
+//         // 如果是返回类型，添加返回类型
+//         if (nSet === undefined) {
+//           console.warn(`returnType or returnAnnotation on undefined type in edge ${cur}->${next}`);
+//           continue;
+//         }
+//         const typeNode = typeNodes.get(nSet);
+//         if (typeNode === undefined || typeNode.kind !== "function") {
+//           console.warn(`returnType or returnAnnotation on non-function type ${printType(nSet)} in edge ${cur}->${next}`);
+//           continue;
+//         }
+
+//         source.get(next)!.set(cur, tSet);
+//         setTypeVar(next, newTypeNode({ kind: "function", name: typeNode.name, id: typeNode.id, params: typeNode.params, returnType: mergeBranches(next, ["returnType"/* , "returnAnnotation" */]) }));
+//       }
 
 
-      // 更新传播
-      if(typeSet.get(next) !== nSet && typeSet.get(next) !== UNKNOWN) worklist.push(next);
-    }
-  }
 
-  // 传递sameID类型
-  for (const [kind, a, b] of allConstraints) {
-    if (kind === "sameID" && typeSet.get(b)) {
-      setTypeVar(a, typeSet.get(b)!);
-    }
-  }
 
-  const result: Record<string, string> = {};
-  for (const [name, id] of globalVarBindings.entries()) {
-    result[name] = printType(typeSet.get(id) ?? UNKNOWN);
-  }
-  return result;
-}
+//       // 更新传播
+//       if(typeSet.get(next) !== nSet && typeSet.get(next) !== UNKNOWN) worklist.push(next);
+//     }
+//   }
+
+//   // 传递sameID类型
+//   for (const [kind, a, b] of allConstraints) {
+//     if (kind === "sameID" && typeSet.get(b)) {
+//       setTypeVar(a, typeSet.get(b)!);
+//     }
+//   }
+
+//   const result: Record<string, string> = {};
+//   for (const [name, id] of globalVarBindings.entries()) {
+//     result[name] = printType(typeSet.get(id) ?? UNKNOWN);
+//   }
+//   return result;
+// }
 
 function find(x: number): number {
   if (parent[x] === undefined) return x;
@@ -2267,247 +2469,266 @@ function mergeIdentifiers() {
   }
 }
 
-// 验证 groundtruth
-function evaluate() {
-  console.log("========== Evaluating type graph consistency ==========");
+// // 验证 groundtruth
+// function evaluate() {
+//   console.log("========== Evaluating type graph consistency ==========");
 
-  const result = {
-    total: 0,
-    correct: 0,
-    wrong: 0,
-    missing: 0,
-    any: 0, // 统计any出现次数
-    unknown: 0, // 统计无法判断类型的注释出现次数
-    wrongEdges: [] as { kind: string, a: number, b: number, aType: string, bType: string }[],
-  };
+//   const result = {
+//     total: 0,
+//     correct: 0,
+//     wrong: 0,
+//     missing: 0,
+//     any: 0, // 统计any出现次数
+//     unknown: 0, // 统计无法判断类型的注释出现次数
+//     wrongEdges: [] as { kind: string, a: number, b: number, aType: string, bType: string }[],
+//   };
 
-  // 遍历类型图中的所有约束
-  for (const [kind, a, b] of allConstraints) {
-    if (kind !== "annotation" && kind !== "returnAnnotation") continue;
+//   // 遍历类型图中的所有约束
+//   for (const [kind, a, b] of allConstraints) {
+//     if (kind !== "annotation" && kind !== "returnAnnotation") continue;
 
-    const aId = find(Number(a));
-    const bId = find(Number(b));
-    // 不统计库文件
-    if (!syntaxNodes[aId].file || path.relative(process.cwd(), syntaxNodes[aId].file).split(path.sep).includes("sdk")) continue;
-    result.total++;
-
-
-    let aType =  printType(typeSet.get(aId) ?? UNKNOWN);
-    if (kind === "returnAnnotation") {
-      const ty = typeNodes.get(typeSet.get(aId) ?? UNKNOWN);
-      if (ty && ty.kind === "function") {
-        const retType = ty.returnType;
-        aType = printType(retType)
-      }
-    }
-    const bType = printType(typeSet.get(bId) ?? UNKNOWN);
-
-    // === (1) 跳过 other 类型比较 ===
-    const isAny = (t: string) => /^any(\[\])?$/.test(t);
-    if (isAny(bType)) {
-      result.any++;
-      continue; // 不计入正确或错误
-    } else if(bType === "unknown") {
-      result.unknown++;
-      console.log(`${[kind, a, b]}`)
-      continue;
-    }
-
-    // === (2) 比较类型一致性 ===
-    if (aType === "unknown") {
-      result.missing++;
-      result.wrongEdges.push({ kind, a: aId, b: bId, aType, bType });
-      // console.warn(`[EVAL] Can not predict type on ${kind} edge ${aId}->${bId}, expected ${bType}`);
-    } else if (aType === bType) {
-      result.correct++;
-      console.log(`[EVAL] Match on ${kind} edge ${syntaxNodes[aId].text}[${aId}]->${syntaxNodes[bId].text}[${bId}]: ${bType}`);
-    } else {
-      result.wrong++;
-      result.wrongEdges.push({ kind, a: aId, b: bId, aType, bType });
-      // console.warn(`[EVAL] Mismatch on ${kind} edge ${aId}->${bId}: inferred ${aType}, expected ${bType}`);
-    }
-  }
-
-  // === (3) 输出汇总报告 ===
-  const other = result.any + result.unknown;
-  const acc = result.correct / Math.max(1, (result.total - other - result.missing));
-  const cov = (result.correct + result.wrong) / (result.total - other);
-  console.log("========== Evaluation Report ==========");
-  console.log(`Total annotations: ${result.total}`);
-  console.log(`Correct: ${result.correct}`);
-  console.log(`Wrong: ${result.wrong}`);
-  console.log(`Missing: ${result.missing}`);
-  console.log(`Ignored: any * ${result.any} + unknown * ${result.unknown} = ${other}`);
-  console.log(`coverage: ${(cov * 100).toFixed(2)}%`);
-  console.log(`Effective accuracy: ${(acc * 100).toFixed(2)}%`);
-
-  // === (4) 输出详细错误列表 ===
-  if (result.wrongEdges.length > 0) {
-    console.log("\n--- Type mismatches ---");
-    for (const w of result.wrongEdges) {
-      const aText = syntaxNodes[w.a]?.text ?? `(node ${w.a})`;
-      const bText = syntaxNodes[w.b]?.text ?? `(node ${w.b})`;
-      if (w.aType === "unknown") continue;
-      console.log(
-        `  [${w.kind}] ${aText}[${w.a}] (${w.aType})  !==  ${bText} (${w.bType})`
-      );
-    }
-  }
-
-  // === (5) 输出遗漏列表 ===
-  if (result.wrongEdges.length > 0) {
-    console.log("\n--- Type underived ---");
-    for (const w of result.wrongEdges) {
-      const aText = syntaxNodes[w.a]?.text ?? `(node ${w.a})`;
-      const bText = syntaxNodes[w.b]?.text ?? `(node ${w.b})`;
-      if (w.aType !== "unknown") continue;
-      console.log(
-        `  [${w.kind}] ${aText}[${w.a}] (${w.aType})  !==  ${bText} (${w.bType})`
-      );
-    }
-  }
-
-  return result;
-}
+//     const aId = find(Number(a));
+//     const bId = find(Number(b));
+//     // 不统计库文件
+//     if (!syntaxNodes[aId].file || path.relative(process.cwd(), syntaxNodes[aId].file).split(path.sep).includes("sdk")) continue;
+//     result.total++;
 
 
-// 输出图和约束
-function emitGlobalTypeGraphAndConstraints() {
-  const types = deriveVariableTypes();
-  if(LOG_EVALUATE_STCS) evaluate();
+//     let aType =  printType(typeSet.get(aId) ?? UNKNOWN);
+//     if (kind === "returnAnnotation") {
+//       const ty = typeNodes.get(typeSet.get(aId) ?? UNKNOWN);
+//       if (ty && ty.kind === "function") {
+//         const retType = ty.returnType;
+//         aType = printType(retType)
+//       }
+//     }
+//     const bType = printType(typeSet.get(bId) ?? UNKNOWN);
 
-  const outDir = path.join(outputDir, "typegraph");
-  fs.mkdirSync(outDir, { recursive: true });
+//     // === (1) 跳过 other 类型比较 ===
+//     const isAny = (t: string) => /^any(\[\])?$/.test(t);
+//     if (isAny(bType)) {
+//       result.any++;
+//       continue; // 不计入正确或错误
+//     } else if(bType === "unknown") {
+//       result.unknown++;
+//       console.log(`${[kind, a, b]}`)
+//       continue;
+//     }
 
-  // 写出 constraints 和推理类型
-  const constraintOut = path.join(outDir, "constraints.json");
-  writeJsonStream(constraintOut, { allConstraints, types });
+//     // === (2) 比较类型一致性 ===
+//     if (aType === "unknown") {
+//       result.missing++;
+//       result.wrongEdges.push({ kind, a: aId, b: bId, aType, bType });
+//       // console.warn(`[EVAL] Can not predict type on ${kind} edge ${aId}->${bId}, expected ${bType}`);
+//     } else if (aType === bType) {
+//       result.correct++;
+//       console.log(`[EVAL] Match on ${kind} edge ${syntaxNodes[aId].text}[${aId}]->${syntaxNodes[bId].text}[${bId}]: ${bType}`);
+//     } else {
+//       result.wrong++;
+//       result.wrongEdges.push({ kind, a: aId, b: bId, aType, bType });
+//       // console.warn(`[EVAL] Mismatch on ${kind} edge ${aId}->${bId}: inferred ${aType}, expected ${bType}`);
+//     }
+//   }
 
-  // 写出类型图（仅 JSON）
-  const jsonGraph = generateTypeGraphJson();
-  const jsonOut = path.join(outDir, "typegraph.json");
-  writeJsonStream(jsonOut, jsonGraph);
+//   // === (3) 输出汇总报告 ===
+//   const other = result.any + result.unknown;
+//   const acc = result.correct / Math.max(1, (result.total - other - result.missing));
+//   const cov = (result.correct + result.wrong) / (result.total - other);
+//   console.log("========== Evaluation Report ==========");
+//   console.log(`Total annotations: ${result.total}`);
+//   console.log(`Correct: ${result.correct}`);
+//   console.log(`Wrong: ${result.wrong}`);
+//   console.log(`Missing: ${result.missing}`);
+//   console.log(`Ignored: any * ${result.any} + unknown * ${result.unknown} = ${other}`);
+//   console.log(`coverage: ${(cov * 100).toFixed(2)}%`);
+//   console.log(`Effective accuracy: ${(acc * 100).toFixed(2)}%`);
 
-  // 写出类型标注结果
-  const json = generateTypeAnno();
-  const outfile = path.join(outputDir, "typeinfo.json");
-  writeJsonStream(outfile, json);
+//   // === (4) 输出详细错误列表 ===
+//   if (result.wrongEdges.length > 0) {
+//     console.log("\n--- Type mismatches ---");
+//     for (const w of result.wrongEdges) {
+//       const aText = syntaxNodes[w.a]?.text ?? `(node ${w.a})`;
+//       const bText = syntaxNodes[w.b]?.text ?? `(node ${w.b})`;
+//       if (w.aType === "unknown") continue;
+//       console.log(
+//         `  [${w.kind}] ${aText}[${w.a}] (${w.aType})  !==  ${bText} (${w.bType})`
+//       );
+//     }
+//   }
 
-  // 按 file 分组
-  const groups : Record<string, any> = {};
-  for (const item of json) {
-    if (!groups[item.relapath]) groups[item.relapath] = [];
-    const { file, relapath, ...rest } = item;  // 去掉 file 字段
-    groups[item.relapath].push(rest);
-  }
+//   // === (5) 输出遗漏列表 ===
+//   if (result.wrongEdges.length > 0) {
+//     console.log("\n--- Type underived ---");
+//     for (const w of result.wrongEdges) {
+//       const aText = syntaxNodes[w.a]?.text ?? `(node ${w.a})`;
+//       const bText = syntaxNodes[w.b]?.text ?? `(node ${w.b})`;
+//       if (w.aType !== "unknown") continue;
+//       console.log(
+//         `  [${w.kind}] ${aText}[${w.a}] (${w.aType})  !==  ${bText} (${w.bType})`
+//       );
+//     }
+//   }
 
-  for (const file in groups) {
-    const outfile = path.join(path.join(outputDir, "typeinfo"), file + ".json");
-    fs.mkdirSync(path.dirname(outfile), { recursive: true }); // 创建目录
-    writeJsonStream(outfile, groups[file]);
-  }
-
-  console.log(`Done. Output written to ${outDir}`);
-
-  // ===== JSON 图生成函数 =====
-  function generateTypeGraphJson(): { nodes: any[]; edges: any[] } {
-    const nodes: any[] = [];
-    const edges: any[] = [];
-    const seen = new Set<number>();
-
-    for (const [srcId, dsts] of graph) {
-      const srcVar = syntaxNodes[srcId];
-      const srcfile = syntaxNodes[srcId]?.file || "unknown";
-      if (!seen.has(srcId)) {
-        nodes.push({
-          id: srcId,
-          label: srcVar?.text || `var_${srcId}`,
-          typeid: typeSet.get(srcId) ?? UNKNOWN,
-          type: printType(typeSet.get(srcId) ?? UNKNOWN),
-          fullType: printFullType(typeSet.get(srcId) ?? UNKNOWN),
-          jsonType: printJsonType(typeSet.get(srcId) ?? UNKNOWN),
-          text: srcVar?.text,
-          file: srcfile.replace(".ast.json", "").replace(/\^/g, "\/").split("ast\/")[1],
-          position: srcVar?.position,
-        });
-        seen.add(srcId);
-      }
-
-      for (const [dstId, edgeKind] of dsts) {
-        const dstVar = syntaxNodes[dstId];
-        const dstfile = syntaxNodes[dstId]?.file || "unknown";
-        if (!seen.has(dstId)) {
-          nodes.push({
-            id: dstId,
-            label: dstVar?.text || `var_${dstId}`,
-            typeid: typeSet.get(dstId) ?? UNKNOWN,
-            type: printType(typeSet.get(dstId) ?? UNKNOWN),
-            fullType: printFullType(typeSet.get(dstId) ?? UNKNOWN),
-            jsonType: printJsonType(typeSet.get(dstId) ?? UNKNOWN),
-            text: dstVar?.text,
-            file: dstfile.replace(".ast.json", "").replace(/\^/g, "\/").split("ast\/")[1],
-            position: dstVar?.position,
-          });
-          seen.add(dstId);
-        }
-
-        edges.push({ from: srcId, to: dstId, label: edgeKind });
-      }
-    }
-
-    return { nodes, edges };
-  }
+//   return result;
+// }
 
 
-  function generateTypeAnno() {
-    const outJson = [];
-    for (const idstr in syntaxNodes) {
-      const id = Number(idstr)
-      const node = syntaxNodes[id];
-      const t = printJsonType(typeSet.get(id) ?? UNKNOWN);
-      const ty = typeNodes.get(typeSet.get(id) ?? UNKNOWN);
-      if (t === "unknown" || !node.v8kind || node.v8kind === "invisible" || node.offset === -1) continue;
-      outJson.push({
-        context: node.context,
-        exprText: node.text,
-        exprKind: node.v8kind,
-        morphKind: node.kind,
-        location: node.offset,
-        pos: node.position,
-        type: t,
-        constant: ty?.kind === "literal" ? ty.value : undefined,
-        relapath: node.file!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, ""),
-        file: path.join(node.file!.split("ast" + require("path").sep)[0].replace("_output", ""), node.file!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")),
-      })
-    }
-    return outJson;
-  }
-}
+// // 输出图和约束
+// function emitGlobalTypeGraphAndConstraints() {
+//   const types = deriveVariableTypes();
+//   if(LOG_EVALUATE_STCS) evaluate();
+
+//   const outDir = path.join(outputDir, "typegraph");
+//   fs.mkdirSync(outDir, { recursive: true });
+
+//   // 写出 constraints 和推理类型
+//   const constraintOut = path.join(outDir, "constraints.json");
+//   writeJsonStream(constraintOut, { allConstraints, types });
+
+//   // 写出类型图（仅 JSON）
+//   const jsonGraph = generateTypeGraphJson();
+//   const jsonOut = path.join(outDir, "typegraph.json");
+//   writeJsonStream(jsonOut, jsonGraph);
+
+//   // 写出类型标注结果
+//   const json = generateTypeAnno();
+//   const outfile = path.join(outputDir, "typeinfo.json");
+//   writeJsonStream(outfile, json);
+
+//   // 按 file 分组
+//   const groups : Record<string, any> = {};
+//   for (const item of json) {
+//     if (!groups[item.relapath]) groups[item.relapath] = [];
+//     const { file, relapath, ...rest } = item;  // 去掉 file 字段
+//     groups[item.relapath].push(rest);
+//   }
+
+//   for (const file in groups) {
+//     const outfile = path.join(path.join(outputDir, "typeinfo"), file + ".json");
+//     fs.mkdirSync(path.dirname(outfile), { recursive: true }); // 创建目录
+//     writeJsonStream(outfile, groups[file]);
+//   }
+
+//   console.log(`Done. Output written to ${outDir}`);
+
+//   // ===== JSON 图生成函数 =====
+//   function generateTypeGraphJson(): { nodes: any[]; edges: any[] } {
+//     const nodes: any[] = [];
+//     const edges: any[] = [];
+//     const seen = new Set<number>();
+
+//     for (const [srcId, dsts] of graph) {
+//       const srcVar = syntaxNodes[srcId];
+//       const srcfile = syntaxNodes[srcId]?.file || "unknown";
+//       if (!seen.has(srcId)) {
+//         nodes.push({
+//           id: srcId,
+//           label: srcVar?.text || `var_${srcId}`,
+//           typeid: typeSet.get(srcId) ?? UNKNOWN,
+//           type: printType(typeSet.get(srcId) ?? UNKNOWN),
+//           fullType: printFullType(typeSet.get(srcId) ?? UNKNOWN),
+//           jsonType: printJsonType(typeSet.get(srcId) ?? UNKNOWN),
+//           text: srcVar?.text,
+//           file: srcfile.replace(".ast.json", "").replace(/\^/g, "\/").split("ast\/")[1],
+//           position: srcVar?.position,
+//         });
+//         seen.add(srcId);
+//       }
+
+//       for (const [dstId, edgeKind] of dsts) {
+//         const dstVar = syntaxNodes[dstId];
+//         const dstfile = syntaxNodes[dstId]?.file || "unknown";
+//         if (!seen.has(dstId)) {
+//           nodes.push({
+//             id: dstId,
+//             label: dstVar?.text || `var_${dstId}`,
+//             typeid: typeSet.get(dstId) ?? UNKNOWN,
+//             type: printType(typeSet.get(dstId) ?? UNKNOWN),
+//             fullType: printFullType(typeSet.get(dstId) ?? UNKNOWN),
+//             jsonType: printJsonType(typeSet.get(dstId) ?? UNKNOWN),
+//             text: dstVar?.text,
+//             file: dstfile.replace(".ast.json", "").replace(/\^/g, "\/").split("ast\/")[1],
+//             position: dstVar?.position,
+//           });
+//           seen.add(dstId);
+//         }
+
+//         edges.push({ from: srcId, to: dstId, label: edgeKind });
+//       }
+//     }
+
+//     return { nodes, edges };
+//   }
+
+
+//   function generateTypeAnno() {
+//     const outJson = [];
+//     for (const idstr in syntaxNodes) {
+//       const id = Number(idstr)
+//       const node = syntaxNodes[id];
+//       const t = printJsonType(typeSet.get(id) ?? UNKNOWN);
+//       const ty = typeNodes.get(typeSet.get(id) ?? UNKNOWN);
+//       if (t === "unknown" || !node.v8kind || node.v8kind === "invisible" || node.offset === -1) continue;
+//       outJson.push({
+//         context: node.context,
+//         exprText: node.text,
+//         exprKind: node.v8kind,
+//         morphKind: node.kind,
+//         location: node.offset,
+//         pos: node.position,
+//         type: t,
+//         constant: ty?.kind === "literal" ? ty.value : undefined,
+//         relapath: node.file!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, ""),
+//         file: path.join(node.file!.split("ast" + require("path").sep)[0].replace("_output", ""), node.file!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")),
+//       })
+//     }
+//     return outJson;
+//   }
+// }
 
 
 // 主流程
-function main() {
-  // 创建一个虚拟节点，表示未知的导入
-  syntaxNodes[0] = { kind: "null", text: "unknown import hole", file: "null", position: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, offset: -1 };
-  // 手动初始化内置类型节点
-  typeNodes.set(NUMBER, { kind: "primitive", name: "number" });
-  typeNodes.set(STRING, { kind: "primitive", name: "string" });
-  typeNodes.set(BOOLEAN, { kind: "primitive", name: "boolean" });
-  typeNodes.set(ANY, { kind: "primitive", name: "any" });
-  typeNodes.set(UNKNOWN, { kind: "primitive", name: "unknown" });
-  typeNodes.set(VOID, { kind: "primitive", name: "void" });
-  typeNodes.set(NULL, { kind: "primitive", name: "null" });
-  typeNodes.set(UNDEFINED, { kind: "primitive", name: "undefined" });
-  typeNodes.set(NEVER, { kind: "primitive", name: "never" });
-  typeNodes.set(REGEXP, { kind: "primitive", name: "RegExp" });
-  typeNodes.set(BIGINT, { kind: "primitive", name: "bigint" });
-  // 初始化类型集合
-  setTypeVar(VOID, VOID)
-  // 初始化typeNodeReverseMap
-  for (const [id, node] of typeNodes.entries()) {
-    typeNodeReverseMap.set(serializeTypeNode(node), Number(id));
-  }
+// function main() {
+//   // 创建一个虚拟节点，表示未知的导入
+//   syntaxNodes[0] = { kind: "null", text: "unknown import hole", file: "null", position: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, offset: -1 };
+//   // 手动初始化内置类型节点
+//   typeNodes.set(NUMBER, { kind: "primitive", name: "number" });
+//   typeNodes.set(STRING, { kind: "primitive", name: "string" });
+//   typeNodes.set(BOOLEAN, { kind: "primitive", name: "boolean" });
+//   typeNodes.set(ANY, { kind: "primitive", name: "any" });
+//   typeNodes.set(UNKNOWN, { kind: "primitive", name: "unknown" });
+//   typeNodes.set(VOID, { kind: "primitive", name: "void" });
+//   typeNodes.set(NULL, { kind: "primitive", name: "null" });
+//   typeNodes.set(UNDEFINED, { kind: "primitive", name: "undefined" });
+//   typeNodes.set(NEVER, { kind: "primitive", name: "never" });
+//   typeNodes.set(REGEXP, { kind: "primitive", name: "RegExp" });
+//   typeNodes.set(BIGINT, { kind: "primitive", name: "bigint" });
+//   // 初始化类型集合
+//   setTypeVar(VOID, VOID)
+//   // 初始化typeNodeReverseMap
+//   for (const [id, node] of typeNodes.entries()) {
+//     typeNodeReverseMap.set(serializeTypeNode(node), Number(id));
+//   }
 
+
+//   const astFiles = getAstFiles(inputDir);
+//   for (const file of astFiles) {
+//     const ast = JSON.parse(fs.readFileSync(file, "utf8"));
+//     firstPass(file, ast);
+//   }
+//   // 控制台输出globalExportMap
+//   if (LOG_IMPORT)
+//     console.log("Global Export Map:", JSON.stringify(globalExportMap, null, 2));
+//   for (const file of astFiles) {
+//     secondPass(file, fileToAst[file]);
+//   }
+
+//   mergeIdentifiers();
+//   emitGlobalTypeGraphAndConstraints();
+//   if (LOG_TYPE_STCS) analyzeIdentifierTypeFeatures();
+//   if (LOG_OPERATOR_STCS) analyzeOperators();
+// }
+function main() {
 
   const astFiles = getAstFiles(inputDir);
   for (const file of astFiles) {
@@ -2521,13 +2742,12 @@ function main() {
     secondPass(file, fileToAst[file]);
   }
 
-  mergeIdentifiers();
-  emitGlobalTypeGraphAndConstraints();
-  if (LOG_TYPE_STCS) analyzeIdentifierTypeFeatures();
-  if (LOG_OPERATOR_STCS) analyzeOperators();
+
+  solver.solve(fact);
+  solver.output();
 }
 
-// 递归获取所有 AST 文件
+// // 递归获取所有 AST 文件
 function getAstFiles(dir: string): string[] {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   let files: string[] = [];
@@ -2541,139 +2761,141 @@ function getAstFiles(dir: string): string[] {
 
 main();
 
-// ===== 基于变量节点的类型特征分析 =====
-function analyzeIdentifierTypeFeatures() {
-  console.log("📊 Identifier Type Feature Analysis Starting...");
+// // ===== 基于变量节点的类型特征分析 =====
+// function analyzeIdentifierTypeFeatures() {
+//   console.log("📊 Identifier Type Feature Analysis Starting...");
 
-  const stats = {
-    primitive: 0,
-    object: 0,
-    func: 0,
-    array: 0,
-    union: 0,
-    unknown: 0,
-    funcParamTotal: 0,
-    funcCount: 0,
-    crossFileRefs: 0,
-    totalNodes: 0,
-  };
+//   const stats = {
+//     primitive: 0,
+//     object: 0,
+//     func: 0,
+//     array: 0,
+//     union: 0,
+//     unknown: 0,
+//     funcParamTotal: 0,
+//     funcCount: 0,
+//     crossFileRefs: 0,
+//     totalNodes: 0,
+//   };
 
-  // 只保留 Identifier 节点
-  const identifierNodes = Object.entries(syntaxNodes)
-    .filter(([_, node]) => node.kind === "Identifier" && node.file && !path.relative(process.cwd(), node.file).split(path.sep).includes("sdk"))
-    .map(([id]) => Number(id));
+//   // 只保留 Identifier 节点
+//   const identifierNodes = Object.entries(syntaxNodes)
+//     .filter(([_, node]) => node.kind === "Identifier" && node.file && !path.relative(process.cwd(), node.file).split(path.sep).includes("sdk"))
+//     .map(([id]) => Number(id));
 
-  for (const id of identifierNodes) {
-    const tyId = typeSet.get(id) ?? UNKNOWN;
-    const tyNode = typeNodes.get(tyId);
+//   for (const id of identifierNodes) {
+//     const tyId = typeSet.get(id) ?? UNKNOWN;
+//     const tyNode = typeNodes.get(tyId);
 
-    stats.totalNodes++;
-    if (!tyNode) {
-      stats.unknown++;
-    } else {
-      switch (tyNode.kind) {
-        case "primitive": if(tyNode.name !== "unknown") stats.primitive++; else stats.unknown++; break;
-        case "object": stats.object++; break;
-        case "function":
-          stats.func++;
-          stats.funcCount++;
-          stats.funcParamTotal += tyNode.params?.length || 0;
-          break;
-        case "array": stats.array++; break;
-        case "union": stats.union++; break;
-      }
-    }
-  }
+//     stats.totalNodes++;
+//     if (!tyNode) {
+//       stats.unknown++;
+//     } else {
+//       switch (tyNode.kind) {
+//         case "primitive": if(tyNode.name !== "unknown") stats.primitive++; else stats.unknown++; break;
+//         case "object": stats.object++; break;
+//         case "function":
+//           stats.func++;
+//           stats.funcCount++;
+//           stats.funcParamTotal += tyNode.params?.length || 0;
+//           break;
+//         case "array": stats.array++; break;
+//         case "union": stats.union++; break;
+//       }
+//     }
+//   }
 
-  // 跨文件引用统计：只要一条边跨文件，就算一次
-  for (const [srcStr, dsts] of Object.entries(graph)) {
-    const src = Number(srcStr);
-    const srcFile = syntaxNodes[src]?.file;
-    if (!srcFile) continue;
+//   // 跨文件引用统计：只要一条边跨文件，就算一次
+//   for (const [srcStr, dsts] of Object.entries(graph)) {
+//     const src = Number(srcStr);
+//     const srcFile = syntaxNodes[src]?.file;
+//     if (!srcFile) continue;
 
-    for (const dstStr in dsts) {
-      const dst = Number(dstStr);
-      const dstFile = syntaxNodes[dst]?.file;
-      if (!dstFile || srcFile === dstFile) continue;
-      stats.crossFileRefs++;
-    }
-  }
+//     for (const dstStr in dsts) {
+//       const dst = Number(dstStr);
+//       const dstFile = syntaxNodes[dst]?.file;
+//       if (!dstFile || srcFile === dstFile) continue;
+//       stats.crossFileRefs++;
+//     }
+//   }
 
-  const result = {
-    totalNodes: stats.totalNodes,
-    primitive: { count: stats.primitive, percent: ((stats.primitive / stats.totalNodes) * 100).toFixed(1) },
-    object: { count: stats.object, percent: ((stats.object / stats.totalNodes) * 100).toFixed(1) },
-    function: { count: stats.func, percent: ((stats.func / stats.totalNodes) * 100).toFixed(1) },
-    array: { count: stats.array, percent: ((stats.array / stats.totalNodes) * 100).toFixed(1) },
-    union: { count: stats.union, percent: ((stats.union / stats.totalNodes) * 100).toFixed(1) },
-    unknown: { count: stats.unknown, percent: ((stats.unknown / stats.totalNodes) * 100).toFixed(1) },
-    "avg function params": (stats.funcParamTotal / (stats.funcCount || 1)).toFixed(2),
-    "cross-file refs ": stats.crossFileRefs,
-  };
+//   const result = {
+//     totalNodes: stats.totalNodes,
+//     primitive: { count: stats.primitive, percent: ((stats.primitive / stats.totalNodes) * 100).toFixed(1) },
+//     object: { count: stats.object, percent: ((stats.object / stats.totalNodes) * 100).toFixed(1) },
+//     function: { count: stats.func, percent: ((stats.func / stats.totalNodes) * 100).toFixed(1) },
+//     array: { count: stats.array, percent: ((stats.array / stats.totalNodes) * 100).toFixed(1) },
+//     union: { count: stats.union, percent: ((stats.union / stats.totalNodes) * 100).toFixed(1) },
+//     unknown: { count: stats.unknown, percent: ((stats.unknown / stats.totalNodes) * 100).toFixed(1) },
+//     "avg function params": (stats.funcParamTotal / (stats.funcCount || 1)).toFixed(2),
+//     "cross-file refs ": stats.crossFileRefs,
+//   };
 
-  // 控制台输出
-  console.log("========== Identifier Type Feature Report ==========");
-  console.log(`Total Identifier nodes: ${result.totalNodes}`);
-  for (const [k, v] of Object.entries(result)) {
-    if (typeof v === "object") {
-      console.log(`${k.padEnd(22)} ${v.count} nodes, ${v.percent}%`);
-    } else {
-      console.log(`${k.padEnd(22)} ${v}`);
-    }
-  }
+//   // 控制台输出
+//   console.log("========== Identifier Type Feature Report ==========");
+//   console.log(`Total Identifier nodes: ${result.totalNodes}`);
+//   for (const [k, v] of Object.entries(result)) {
+//     if (typeof v === "object") {
+//       console.log(`${k.padEnd(22)} ${v.count} nodes, ${v.percent}%`);
+//     } else {
+//       console.log(`${k.padEnd(22)} ${v}`);
+//     }
+//   }
 
-  return result;
-}
+//   return result;
+// }
 
-// ===== 分析操作符 =====
-function analyzeOperators() {
-  let total_operators = 0;
-  let needed_operators = 0;
-  let total_operands = 0;
-  const map = new Map<string, Map<string, number>>();
-  const map_cnt = new Map<string, number>();
+// // ===== 分析操作符 =====
+// function analyzeOperators() {
+//   let total_operators = 0;
+//   let needed_operators = 0;
+//   let total_operands = 0;
+//   const map = new Map<string, Map<string, number>>();
+//   const map_cnt = new Map<string, number>();
 
-  for (const [key, value] of operator_cnts.entries()) {
-    total_operators += value;
-    if (["==", "===", "!=", "!==", "!", "typeof"].includes(key)) needed_operators += value;
-  }
+//   for (const [key, value] of operator_cnts.entries()) {
+//     total_operators += value;
+//     if (["==", "===", "!=", "!==", "!", "typeof"].includes(key)) needed_operators += value;
+//   }
 
-  for (const [key, value] of operator_cnts.entries()) {
-    console.log(`Operator ${key}: ${value} occurrences, ${(value / total_operators * 100).toFixed(2)}%`);
-  }
+//   for (const [key, value] of operator_cnts.entries()) {
+//     console.log(`Operator ${key}: ${value} occurrences, ${(value / total_operators * 100).toFixed(2)}%`);
+//   }
 
-  for (const [key, value] of operands.entries()) {
-    if (["==", "===", "!=", "!==", "!", "typeof"].includes(key)) {
-      for (const v of value) {
-        if (!syntaxNodes[v].v8kind) continue;
-        const tyNode = typeNodes.get(typeSet.get(v) ?? UNKNOWN);
-        if (!tyNode) continue;
-        total_operands++;
-        let name;
-        switch (tyNode.kind) {
-          case "primitive": name = tyNode.name; break;
-          case "object":
-          case "function":
-          case "array":
-          case "union": name = tyNode.kind; break;
-          default: name = "unknown"; break;
-        }
-        if (!map.has(key)) map.set(key, new Map<string, number>());
-        const submap = map.get(key)!;
-        submap.set(name, (submap.get(name) ?? 0) + 1);
-        map_cnt.set(key, (map_cnt.get(key) ?? 0) + 1);
-      }
-    }
-  }
+//   for (const [key, value] of operands.entries()) {
+//     if (["==", "===", "!=", "!==", "!", "typeof"].includes(key)) {
+//       for (const v of value) {
+//         if (!syntaxNodes[v].v8kind) continue;
+//         const tyNode = typeNodes.get(typeSet.get(v) ?? UNKNOWN);
+//         if (!tyNode) continue;
+//         total_operands++;
+//         let name;
+//         switch (tyNode.kind) {
+//           case "primitive": name = tyNode.name; break;
+//           case "object":
+//           case "function":
+//           case "array":
+//           case "union": name = tyNode.kind; break;
+//           default: name = "unknown"; break;
+//         }
+//         if (!map.has(key)) map.set(key, new Map<string, number>());
+//         const submap = map.get(key)!;
+//         submap.set(name, (submap.get(name) ?? 0) + 1);
+//         map_cnt.set(key, (map_cnt.get(key) ?? 0) + 1);
+//       }
+//     }
+//   }
 
-  console.log("========== Operator Operand Type Report ==========");
-  console.log(`Needed operator / Total operator = ${needed_operators} / ${total_operators} = ${((needed_operators / total_operators) * 100).toFixed(2)}%`);
-  console.log(`Total operands for needed operators: ${total_operands}`);
-  for (const [key, val] of map) {
-    console.log(`-- Operator: ${key} --`);
-    const tot = map_cnt.get(key)!;
-    for (const [k, v] of val) {
-      console.log(`   Type ${k}: ${v} occurrences, ${((v / tot) * 100).toFixed(2)}%`);
-    }
-  }
-}
+//   console.log("========== Operator Operand Type Report ==========");
+//   console.log(`Needed operator / Total operator = ${needed_operators} / ${total_operators} = ${((needed_operators / total_operators) * 100).toFixed(2)}%`);
+//   console.log(`Total operands for needed operators: ${total_operands}`);
+//   for (const [key, val] of map) {
+//     console.log(`-- Operator: ${key} --`);
+//     const tot = map_cnt.get(key)!;
+//     for (const [k, v] of val) {
+//       console.log(`   Type ${k}: ${v} occurrences, ${((v / tot) * 100).toFixed(2)}%`);
+//     }
+//   }
+// }
+
+export {tNode, solver, outputDir, meta};
