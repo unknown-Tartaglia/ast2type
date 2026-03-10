@@ -41,7 +41,6 @@ let srcFiles : string[] = [];
 const globalImportMap = new Map<string, string>();
 const suffixes = ["", ".ts", ".js", ".mjs", ".ets", ".tsx", ".d.ts", ".d.ets", ".android.bundle"];
 const visitedFiles = new Set<string>();
-let lineStarts: number[] = [];
 const position = {
   "start": {
     "line": -1,
@@ -201,7 +200,7 @@ function constructImportAST(id: string, filePath: string): any {
 
 let _dependencyMap : string[] = [];
 let __d_idx = 0;
-function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | null {
+function serializeNode(node: Node, isSDK: boolean, kitImports: string[], lineStarts: number[]): any | null {
   if (ignoredKinds.has(node.getKind())) return null;
 
   const serialized: any = {
@@ -269,7 +268,7 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
   }
   // 处理_defineProperty
   else if (node.getKind() === SyntaxKind.CallExpression && node.getChildAtIndex(0).getKind() === SyntaxKind.Identifier && node.getChildAtIndex(0).getText() === "_defineProperty") {
-    const targetNode = serializeNode(node.getChildAtIndex(2).getChildAtIndex(0), isSDK, kitImports);
+    const targetNode = serializeNode(node.getChildAtIndex(2).getChildAtIndex(0), isSDK, kitImports, lineStarts);
     const propNameNode = node.getChildAtIndex(2).getChildAtIndex(2);
     let propName: string;
     if (propNameNode.getKind() === SyntaxKind.StringLiteral || propNameNode.getKind() === SyntaxKind.NumericLiteral) {
@@ -277,7 +276,7 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
     } else {
       propName = propNameNode.getText();
     }
-    const valueNode = serializeNode(node.getChildAtIndex(2).getChildAtIndex(4), isSDK, kitImports);
+    const valueNode = serializeNode(node.getChildAtIndex(2).getChildAtIndex(4), isSDK, kitImports, lineStarts);
     return {
       "kind": "BinaryExpression",
       "offset": -1,
@@ -330,7 +329,7 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
     if (nameNode && funcBodyExprs) {
       for (const expr of funcBodyExprs.getChildren()) {
         if (expr.getKind() === SyntaxKind.FunctionDeclaration && getDeepChild(expr, 1)?.getText() === nameNode.getText()) {
-          consturctor = serializeNode(expr, isSDK, kitImports);
+          consturctor = serializeNode(expr, isSDK, kitImports, lineStarts);
           consturctor.kind = "Constructor";
           consturctor.children[0].kind = "ConstructorKeyword";
           consturctor.children[0].text = "constructor";
@@ -347,7 +346,7 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
                 let ValueNode = getDeepChild(classArg, 1, 2, 2);
                 let prop;
                 if (ValueNode?.getKind() === SyntaxKind.FunctionExpression) {
-                  prop = serializeNode(ValueNode, isSDK, kitImports);
+                  prop = serializeNode(ValueNode, isSDK, kitImports, lineStarts);
                   if (kind === "get") {
                     prop.kind = "GetAccessor";
                     prop.children[0].kind = "GetKeyword";
@@ -367,7 +366,7 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
                 kind = getDeepChild(classArg, 1, 4, 0)?.getText();
                 ValueNode = getDeepChild(classArg, 1, 4, 2);
                 if (ValueNode?.getKind() === SyntaxKind.FunctionExpression) {
-                  prop = serializeNode(ValueNode, isSDK, kitImports);
+                  prop = serializeNode(ValueNode, isSDK, kitImports, lineStarts);
                   if (kind === "get") {
                     prop.kind = "GetAccessor";
                     prop.children[0].kind = "GetKeyword";
@@ -400,9 +399,9 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
           },
           {
             "kind": "Identifier",
-            "offset": serializeNode(nameNode, isSDK, kitImports).offset,
+            "offset": serializeNode(nameNode, isSDK, kitImports, lineStarts).offset,
             "text": nameNode.getText(),
-            "position": serializeNode(nameNode, isSDK, kitImports).position
+            "position": serializeNode(nameNode, isSDK, kitImports, lineStarts).position
           },
           {
             "kind": "FirstPunctuation",
@@ -431,7 +430,7 @@ function serializeNode(node: Node, isSDK: boolean, kitImports: string[]): any | 
 
   const children: any[] = [];
   for (const child of node.getChildren()) {
-    const sc = serializeNode(child, isSDK, kitImports);
+    const sc = serializeNode(child, isSDK, kitImports, lineStarts);
     if (sc !== null) children.push(sc);
   }
 
@@ -652,6 +651,10 @@ export function writeJsonStream(file: string, obj: any) {
   }
 
   function writeValue(value: any) {
+    if (value === undefined) {
+      out.write("null");
+      return;
+    }
     if (value === null) {
       out.write("null");
     } else if (Array.isArray(value)) {
@@ -679,7 +682,13 @@ export function writeJsonStream(file: string, obj: any) {
       if (keys.length > 0) newline();
       out.write("}");
     } else {
-      out.write(JSON.stringify(value));
+      const str = JSON.stringify(value);
+      if (str === undefined) {
+        console.warn(`JSON.stringify returned undefined for value: ${typeof value}`, value);
+        out.write("null");
+      } else {
+        out.write(str);
+      }
     }
   }
 
@@ -699,8 +708,8 @@ function dumpFile(filePath: string | null, isSDK = false, kitImports : string[] 
   visitedFiles.add(absPath);
   console.log(`AST dumping: ${absPath}`);
   const sourceFile = project.addSourceFileAtPath(absPath);
-  lineStarts = buildLineMap(sourceFile.getFullText());
-  let astJson = serializeNode(sourceFile, isSDK, kitImports);
+  const lineStarts = buildLineMap(sourceFile.getFullText());
+  let astJson = serializeNode(sourceFile, isSDK, kitImports, lineStarts);
   let relativePath : string;
   let outputFilePath : string;
   if (!isSDK) {
