@@ -1,4 +1,4 @@
-import { DEDUCE_ONLY_WHEN_ALL_KNOWNN, LOG_TYPE_FLOW, LOG_TYPENODE, LOG_TYPENODE_VERBOSE, solver, tNode } from "../ast2type";
+import { DEDUCE_ONLY_WHEN_ALL_KNOWNN, LOG_TYPE_FLOW, LOG_TYPENODE, LOG_TYPENODE_VERBOSE, meta, solver, tNode } from "../ast2type";
 import { VarId } from "./fact";
 
 export class tNodeStore {
@@ -11,6 +11,8 @@ export class tNodeStore {
     NUMBER = 2;
     STRING = 3;
     BOOLEAN = 4;
+    UNDEFINED = 5;
+    VOID = 6;
 
     constructor() {
         // 预定义一些基础类型
@@ -19,6 +21,8 @@ export class tNodeStore {
         this.typeNodes.push({ kind: "primitive", name: "number" });  // 2: number
         this.typeNodes.push({ kind: "primitive", name: "string" });  // 3: string
         this.typeNodes.push({ kind: "primitive", name: "boolean" }); // 4: boolean
+        this.typeNodes.push({ kind: "primitive", name: "undefined" }); // 5: undefined
+        this.typeNodes.push({ kind: "primitive", name: "void" }); // 6: void
         for (let i = 0; i < this.typeNodes.length; i++) {
             const serialized = this.serialize(this.typeNodes[i]);
             this.reverseMap.set(serialized, i);
@@ -53,7 +57,7 @@ export class tNodeStore {
         for (const state of affectedStates ?? []) {
             for (const node of solver.graph.state2node.get(state) ?? []) {
                 solver.worklist.push(node);
-                console.log(`TypeNode ${node} affected by modification of TypeId ${id}, added to worklist`);
+                // console.log(`TypeNode ${node} affected by modification of TypeId ${id}, added to worklist`);
             }
         }
     }
@@ -75,12 +79,16 @@ export class tNodeStore {
                 case "array": t.elementType = helper(this.typeNodes[t.elementType]); break;
                 case "function":
                     if (occur.has(t.id)) {
-                        occur.set(t.id, this.newTypeNode(t));
                         return occur.get(t.id)!;
                     }
                     occur.set(t.id, this.UNKNOWN);
 
                     t.returnType = helper(this.typeNodes[t.returnType]);
+
+                    // 处理参数
+                    for (const idx in t.param) {
+                        t.param[idx].type = helper(this.typeNodes[t.param[idx].type]);
+                    }
 
                     if (occur.get(t.id) !== this.UNKNOWN && this.serialize(this.typeNodes[occur.get(t.id)!]) !== this.serialize(t)) {
                         this.modifyTypeNode(occur.get(t.id)!, t);
@@ -92,7 +100,6 @@ export class tNodeStore {
                     break;
                 case "object":
                     if (occur.has(t.id)) {
-                        occur.set(t.id, this.newTypeNode(t));
                         return occur.get(t.id)!;
                     }
                     occur.set(t.id, this.UNKNOWN);
@@ -173,7 +180,7 @@ export class tNodeStore {
                 ret = `array:${t.elementType}`;
                 break;
             case "function":
-                ret = `function${t.id}->${t.returnType}`;
+                ret = `function${t.id}:${Object.entries(t.param).sort().map(([idx, {id, type}]) => `${idx}:${id}:${type}`).join(",")}->${t.returnType}`;
                 break;
             case "union":
                 ret = `union:${t.types.sort().join("|")}`;
@@ -191,42 +198,180 @@ export class tNodeStore {
     // 打印完整类型
     printFullType(n: TypeId): string {
         const occur: Record<string, TypeId> = {};
+        const visited = new Set<TypeId>();
         return helper(this.typeNodes, n);
         function helper(typeNodes: nType[], n: TypeId): string {
+            if (visited.has(n)) {
+                return `<cyclic #${n}>`;
+            }
+            visited.add(n);
+
             const t = typeNodes[n];
             if (!t) {
                 // if (LOG_TYPENODE)
                 console.warn(`Type ID ${n} not found in typeNodes`);
+                visited.delete(n);
                 return "impossible! type unknown in printFullType";
             }
+            let result: string;
             switch (t.kind) {
                 case "primitive":
-                    return t.name;
+                    result = t.name;
+                    break;
                 case "literal":
-                    return `literal:${t.value}`;
+                    result = `literal:${t.value}`;
+                    break;
                 case "array":
-                    return helper(typeNodes, t.elementType) + "[]";
+                    result = helper(typeNodes, t.elementType) + "[]";
+                    break;
                 case "function":
                     if (occur[t.id]) {
-                        return `function:${t.name}`;
+                        result = `function:${t.name}`;
+                        break;
                     }
                     occur[t.id] = n;
-
-                    return `() => ${helper(typeNodes, t.returnType)}`;
+                    // 构建参数列表
+                    const paramIndices = Object.keys(t.param).map(Number).sort();
+                    const paramsStr = paramIndices.map(idx => {
+                        const paramInfo = t.param[idx];
+                        const paramName = meta.paramName.get(paramInfo.id) || `param_${idx}`;
+                        const paramType = helper(typeNodes, paramInfo.type);
+                        return `${paramName}: ${paramType}`;
+                    }).join(", ");
+                    result = `(${paramsStr}) => ${helper(typeNodes, t.returnType)}`;
+                    break;
                 case "object":
                     if (occur[t.id]) {
-                        return `object:${t.name}`;
+                        result = `object:${t.name}`;
+                        break;
                     }
                     occur[t.id] = n;
                     const propsStr = Object.entries(t.properties)
                         .map(([k, v]) => `${k}: ${helper(typeNodes, v)}`)
                         .join("; ");
-                    return `{ ${t.name} | ${propsStr} }`;
+                    result = `{ ${t.name} | ${propsStr} }`;
+                    break;
                 case "union":
-                    return t.types.map(ty => helper(typeNodes, ty)).join(" | ");
+                    result = t.types.map(ty => helper(typeNodes, ty)).join(" || ");
+                    break;
                 case "enum":
-                    return `enum ${t.name} { ${Object.entries(t.members).sort().map(([k, v]) => `${k}=${v}`).join(",")} }`;
+                    result = `enum ${t.name} { ${Object.entries(t.members).sort().map(([k, v]) => `${k}=${v}`).join(",")} }`;
+                    break;
             }
+            visited.delete(n);
+            return result;
+        }
+    }
+
+    printJsonType(typeId: TypeId): any {
+        const visited = new Set<TypeId>();
+        const occur: Record<number, TypeId> = {}; // 通过变量 ID 检测循环引用
+        const helper = (id: TypeId): any => {
+            if (visited.has(id)) {
+                return `<cyclic #${id}>`;
+            }
+            visited.add(id);
+            const t = this.typeNodes[id];
+            if (!t) {
+                visited.delete(id);
+                return { kind: "unknown", id };
+            }
+            let result: any;
+            switch (t.kind) {
+                case "primitive":
+                    result = { kind: "primitive", name: t.name };
+                    break;
+                case "literal":
+                    result = { kind: "literal", value: t.value };
+                    break;
+                case "array":
+                    result = { kind: "array", elementType: helper(t.elementType) };
+                    break;
+                case "function":
+                    if (occur[t.id]) {
+                        result = `function:${t.name}`;
+                        break;
+                    }
+                    occur[t.id] = id;
+                    const params: any[] = [];
+                    const paramIndices = Object.keys(t.param).map(Number).sort();
+                    for (const idx of paramIndices) {
+                        const paramInfo = t.param[idx];
+                        params.push({
+                            name: meta.paramName.get(paramInfo.id) || `param_${idx}`,
+                            type: helper(paramInfo.type)
+                        });
+                    }
+                    result = {
+                        kind: "function",
+                        name: t.name,
+                        id: t.id,
+                        params,
+                        returnType: helper(t.returnType)
+                    };
+                    break;
+                case "union":
+                    result = { kind: "union", types: t.types.map(ty => helper(ty)) };
+                    break;
+                case "object":
+                    if (occur[t.id]) {
+                        result = `object:${t.name}`;
+                        break;
+                    }
+                    occur[t.id] = id;
+                    const properties: Record<string, any> = {};
+                    for (const [key, propTypeId] of Object.entries(t.properties)) {
+                        properties[key] = helper(propTypeId);
+                    }
+                    result = {
+                        kind: "object",
+                        name: t.name,
+                        properties
+                    };
+                    break;
+                case "enum":
+                    const members: Record<string, any> = {};
+                    for (const [key, memberTypeId] of Object.entries(t.members)) {
+                        members[key] = helper(memberTypeId);
+                    }
+                    result = {
+                        kind: "enum",
+                        name: t.name,
+                        members
+                    };
+                    break;
+                default:
+                    console.warn(`Unknown kind in printJsonType: ${(t as any).kind}`);
+                    result = { kind: "unknown", id };
+                    break;
+            }
+            visited.delete(id);
+            return result;
+        };
+        return helper(typeId);
+    }
+
+    printAnnoType(typeId: TypeId): any {
+        const node = this.typeNodes[typeId];
+        if (!node) return "unknown";
+      
+        switch (node.kind) {
+          case "primitive":
+            return node.name;
+          case "literal":
+            return (typeof node.value) + " constant";
+          case "union":
+            return Array.from(new Set(node.types.map(t => this.printAnnoType(t))));
+          case "array":
+            return `array`;
+          case "object":
+            return "object";
+          case "enum":
+            return "enum";
+          case "function":
+            return "function"
+          default:
+            return "unknown"
         }
     }
 }
@@ -238,7 +383,7 @@ export type nType =
     | { kind: "primitive"; name: string }
     | { kind: "literal"; value: string | number | boolean | RegExp | bigint | null }
     | { kind: "array"; elementType: number }
-    | { kind: "function"; name: string; id: number; returnType: number }
+    | { kind: "function"; name: string; id: number; param: Record<number, {id: number; type: number}>; returnType: number }
     | { kind: "union"; types: number[] }
     | { kind: "object"; name: string; id: number; properties: Record<string, number> }
     | { kind: "enum"; name: string; members: Record<string, number> };
@@ -250,8 +395,16 @@ export interface NodeState {
     getProperty(prop: string): NodeState | null
     addElement(ns: NodeState): boolean
     getElement(): NodeState | null
-    toString(): string
+    addParam(paramId: VarId, paramType: NodeState): boolean
+    getParam(paramId: VarId): NodeState | null
+    addReturnType(returnType: NodeState): boolean
+    getReturnType(): NodeState | null
+    getFuncVaridorNull(): VarId | null
     equals(other: NodeState): boolean
+    toString(): string
+    toJson(): any
+    toAnno(): any
+
 }
 
 export class DeterminantNodeState implements NodeState {
@@ -330,16 +483,134 @@ export class DeterminantNodeState implements NodeState {
         return new DeterminantNodeState(typeNode.elementType);
     }
 
+    addParam(paramId: VarId, paramType: NodeState): boolean {
+        const typeNode = tNode.get(this.val);
+        if (!typeNode) {
+            console.warn(`Trying to add param to undefined typeid: ${this.val}`);
+            return false;
+        }
+        if (typeNode.kind !== "function") {
+            console.warn(`Trying to add param to non-function type: ${tNode.printFullType(this.val)}`);
+            return false;
+        }
+
+        // 从meta获取参数索引
+        const paramIndex = meta.paramIndex.get(paramId);
+        if (paramIndex === undefined) {
+            console.warn(`Parameter index not found for paramId: ${paramId}`);
+            return false;
+        }
+
+        // 检查是否已存在该索引的参数
+        if (paramIndex in typeNode.param) {
+            // 更新现有参数类型
+            if (typeNode.param[paramIndex].type === paramType.val) {
+                return false; // 类型相同，无需修改
+            }
+            typeNode.param[paramIndex] = { id: paramId, type: paramType.val };
+        } else {
+            // 添加新参数
+            typeNode.param[paramIndex] = { id: paramId, type: paramType.val };
+        }
+
+        tNode.modifyTypeNode(this.val, typeNode);
+        return true;
+    }
+
+    getParam(paramId: VarId): NodeState | null {
+        const typeNode = tNode.get(this.val);
+        if (!typeNode) {
+            console.warn(`Trying to get param from undefined typeid: ${this.val}`);
+            return null;
+        }
+        if (typeNode.kind !== "function") {
+            console.warn(`Trying to get param from non-function type: ${tNode.printFullType(this.val)}`);
+            return null;
+        }
+
+        // 从meta获取参数索引，然后查找
+        const paramIndex = meta.paramIndex.get(paramId);
+        if (paramIndex === undefined) {
+            return null;
+        }
+
+        const paramInfo = typeNode.param[paramIndex];
+        if (!paramInfo || paramInfo.id !== paramId) {
+            return null;
+        }
+
+        return new DeterminantNodeState(paramInfo.type);
+    }
+
+    addReturnType(returnType: NodeState): boolean {
+        const typeNode = tNode.get(this.val);
+        if (!typeNode) {
+            console.warn(`Trying to add return type on undefined typeid: ${this.val}`);
+            return false;
+        }
+        if (typeNode.kind !== "function") {
+            console.warn(`Trying to add return type on non-function type: ${tNode.printFullType(this.val)}`);
+            return false;
+        }
+
+        const oldReturnType = typeNode.returnType;
+        const newReturnType = tNode.merge([oldReturnType, returnType.val]);
+
+        if (oldReturnType === newReturnType) {
+            return false; // 返回类型未改变
+        }
+
+        typeNode.returnType = newReturnType;
+        tNode.modifyTypeNode(this.val, typeNode);
+        return true;
+    }
+
+    getReturnType(): NodeState | null {
+        const typeNode = tNode.get(this.val);
+        if (!typeNode) {
+            console.warn(`Trying to get return type from undefined typeid: ${this.val}`);
+            return null;
+        }
+        if (typeNode.kind !== "function") {
+            console.warn(`Trying to get return type from non-function type: ${tNode.printFullType(this.val)}`);
+            return null;
+        }
+        return new DeterminantNodeState(typeNode.returnType);
+    }
+
     // static merge(tys: DeterminantNodeState[]): DeterminantNodeState {
     //     const typeIds = tys.map(t => t.val);
     //     const mergedTypeId = tNode.merge(typeIds);
     //     return new DeterminantNodeState(mergedTypeId);
     // }
-    equals(other: DeterminantNodeState): boolean {
-        return this.val === other?.val;
+
+    getFuncVaridorNull(): VarId | null {
+        const typeNode = tNode.get(this.val);
+        if (!typeNode) {
+            console.warn(`Trying to get func varId from undefined typeid: ${this.val}`);
+            return null;
+        }
+        if (typeNode.kind !== "function") {
+            console.warn(`Trying to get func varId from non-function type: ${tNode.printFullType(this.val)}`);
+            return null;
+        }
+        return typeNode.id ?? null;
+    }
+
+    equals(other: NodeState): boolean {
+        const detNode = other as DeterminantNodeState;
+        return this.val === detNode?.val;
     }
 
     toString(): string {
         return tNode.printFullType(this.val);
+    }
+
+    toJson() {
+        return tNode.printJsonType(this.val);
+    }
+
+    toAnno(): any {
+        return tNode.printAnnoType(this.val);
     }
 }

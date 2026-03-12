@@ -19,7 +19,7 @@ export class DeterminantStrategy implements Strategy {
         const worklist: VarId[] = [];
         const fromType = graph.nodes.get(nodeId);
         if (fromType === undefined) return worklist;
-        for (const edge of Array.from(graph.toEdges.get(nodeId) ?? []).filter(e => e.type === "sameType")) {
+        for (const edge of Array.from(graph.toEdges.get(nodeId) ?? []).filter(e => e.type === "sameType" || e.type === "ArgToParam")) {
             // 简单的类型传播：将 nodeId 的类型传播到 edge.to
             graph.setSrcType(edge, fromType);
             const toNode = edge.to;
@@ -35,7 +35,7 @@ export class DeterminantStrategy implements Strategy {
 
     merge(nodeId: VarId, graph: TypeGraph) {
         // 简单的合并策略：取所有合并节点的类型的并集
-        const edges = Array.from(graph.getFromEdges(nodeId)).filter(e => e.type === "sameType");
+        const edges = Array.from(graph.getFromEdges(nodeId)).filter(e => e.type === "sameType" || e.type === "ArgToParam");
         const mergedTypes = new Set<NodeState>();
         for (const edge of edges)
             if (edge.cand) {

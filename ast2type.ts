@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { Command } from "commander";
 import { writeJsonStream } from "./code2ast"
-import { FactStore, Emitter } from "./ast2type/fact"
+import { FactStore, Emitter, VarId } from "./ast2type/fact"
 import { MetaStore } from "./ast2type/meta"
 import { Solver } from "./ast2type/solver";
 import { tNodeStore } from "./ast2type/nType";
@@ -516,6 +516,7 @@ function firstPass(filePath: string, ast: AstNode) {
       if (idNodes.length > 0) {
         for (const idNode of idNodes) 
           if (idNode.children && idNode.children.length > 0 && idNode.children[0].kind === "Identifier" && idNode.children[0].text){
+            globalExportMap[realPath] ??= {};
             globalExportMap[realPath][idNode.children[0].text] = idNode.children[0].varId!;
             if (idNode.children.length === 3 && idNode.children[1].kind === "FirstAssignment")
               emit.flow(idNode.children[2].varId!, idNode.children[0].varId!, idNode.text);
@@ -524,6 +525,7 @@ function firstPass(filePath: string, ast: AstNode) {
         if (dftkwd && idNodes.length === 1) {
           const idNode = idNodes[0];
           if (idNode.children && idNode.children.length > 0 && idNode.children[0].kind === "Identifier" && idNode.children[0].text) {
+            globalExportMap[realPath] ??= {};
             globalExportMap[realPath][dftkwd.text!] = dftkwd.varId!;
             emit.flow(idNode.children[0].varId!, dftkwd.varId!, "default keyword");
             // allConstraints.push(["sameType", dftkwd.varId!, idNodes[0].varId!, "default keyword"]);
@@ -617,6 +619,9 @@ function secondPass(filePath: string, node: AstNode) {
           varBindings.set(idNode.text, idNode.varId!);
           meta.funcName.set(node.varId!, idNode.text);
           emit.allocFunction(node.varId!, idNode.varId);
+          if (node.varId !== idNode.varId) {
+              meta.funcBindMap.set(idNode.varId, node.varId!);
+          }
         }
 
 
@@ -633,7 +638,7 @@ function secondPass(filePath: string, node: AstNode) {
         }
         else if (findNodesByKind(node, "ReturnStatement").length === 0) {
           // 如果没有返回类型注解并且没有Return语句
-          emit.returnVoid(idNode!.varId!);
+          emit.returnVoid(node.varId!);
           // const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: VOID });
           // setTypeVar(idNode?.varId!, id);
         }
@@ -725,6 +730,7 @@ function secondPass(filePath: string, node: AstNode) {
       if (!paNode || paNode.varId === undefined || paNode.kind !== "ModuleDeclaration") return;
       paNode = paNode.children?.find(n => n.kind === "Identifier");
       if (!paNode) return;
+      if (left.text) meta.propName.set(left.varId!, left.text);
       emit.prop(paNode.varId!, left.varId!);
       // allConstraints.push(["initProperty", paNode.varId!, left.varId!, `${paNode.text!}.${left.text!}`]);
       // allConstraints.push(["takeProperty", left.varId!, paNode.varId!, `${paNode.text!}.${left.text!}`]);
@@ -764,6 +770,11 @@ function secondPass(filePath: string, node: AstNode) {
         const params = node.parent?.children?.filter(n => n.kind === "Parameter") || [];
         const index = params.findIndex(p => p === node);
         emit.param(funcIdNode.varId!, paramIdNode.varId!, index)
+        meta.paramIndex.set(paramIdNode.varId!, index)
+        if (!meta.funcParamMap.has(funcIdNode.varId!)) {
+            meta.funcParamMap.set(funcIdNode.varId!, new Map<number, VarId>())
+        }
+        meta.funcParamMap.get(funcIdNode.varId!)!.set(index, paramIdNode.varId!)
 
         // allConstraints.push(["setParamType", funcIdNode.varId!, paramIdNode.varId!, `parameter ${paramIdNode.text!} in function ${funcIdNode.text!}`]);
         // if (!funcParam[funcIdNode.varId]) funcParam[funcIdNode.varId] = [];
@@ -787,6 +798,7 @@ function secondPass(filePath: string, node: AstNode) {
         if (!paNode || paNode.varId === undefined || paNode.kind !== "ModuleDeclaration") return;
         paNode = paNode.children?.find(n => n.kind === "Identifier");
         if (!paNode) return;
+        if (idNode.text) meta.propName.set(idNode.varId!, idNode.text);
         emit.prop(paNode.varId!, idNode.varId!);
         // allConstraints.push(["initProperty", paNode.varId!, idNode.varId!, `${paNode.text!}.${idNode.text!}`]);
         // allConstraints.push(["takeProperty", idNode.varId!, paNode.varId!, `${idNode.text!}.${paNode.text!}`]);
@@ -828,6 +840,7 @@ function secondPass(filePath: string, node: AstNode) {
         if (!paNode || paNode.varId === undefined || paNode.kind !== "ModuleDeclaration") return;
         paNode = paNode.children?.find(n => n.kind === "Identifier");
         if (!paNode) return;
+        if (idNode.text) meta.propName.set(idNode.varId!, idNode.text);
         emit.prop(paNode.varId!, idNode.varId!);
         // allConstraints.push(["initProperty", paNode.varId!, idNode.varId!, `${paNode.text!}.${idNode.text!}`]);
         // allConstraints.push(["takeProperty", idNode.varId!, paNode.varId!, `${idNode.text!}.${paNode.text!}`]);
@@ -851,6 +864,7 @@ function secondPass(filePath: string, node: AstNode) {
         if (index !== undefined && index !== -1) {
           const typeNode = node.children?.[index + 1];
           if (typeNode && typeNode.varId) {
+            if (propIdNode.text) meta.propName.set(propIdNode.varId!, propIdNode.text);
             emit.prop(idNode.varId!, propIdNode.varId!);
             emit.annot(propIdNode.varId!, typeNode.varId!);
             // allConstraints.push(["initProperty", idNode.varId!, propIdNode.varId!, `${idNode.text!}.${propIdNode.text!}`]);
@@ -858,6 +872,7 @@ function secondPass(filePath: string, node: AstNode) {
             // allConstraints.push(["annotation", propIdNode.varId, typeNode.varId, `annotation ${idNode.text!}.${propIdNode.text!} : ${typeNode.text!}`]);
           }
         } else {
+          if (propIdNode.text) meta.propName.set(propIdNode.varId!, propIdNode.text);
           emit.prop(idNode.varId!, propIdNode.varId!);
           // allConstraints.push(["initProperty", idNode.varId!, propIdNode.varId!, `${idNode.text!}.${propIdNode.text!}`]);
           // allConstraints.push(["takeProperty", propIdNode.varId!, idNode.varId!, `${propIdNode.text!}.${idNode.text!}`]);
@@ -892,6 +907,10 @@ function secondPass(filePath: string, node: AstNode) {
 
         meta.funcName.set(node.varId!, methodIdNode.text!);
         emit.allocFunction(node.varId!, methodIdNode.varId!);
+        if (node.varId !== methodIdNode.varId) {
+            meta.funcBindMap.set(methodIdNode.varId!, node.varId!);
+        }
+        if (methodIdNode.text) meta.propName.set(methodIdNode.varId!, methodIdNode.text);
         emit.prop(idNode.varId!, methodIdNode.varId!);
         // const typeId = newTypeNode(funcType);
         // setTypeVar(methodIdNode.varId!, typeId);
@@ -930,6 +949,8 @@ function secondPass(filePath: string, node: AstNode) {
         const propIdNode = findNodesByKind(node, "Identifier")[0];
         if (!propIdNode || propIdNode.varId === undefined) return;
 
+        if (propIdNode.text) meta.propName.set(propIdNode.varId!, propIdNode.text);
+        console.log(`PropertyDeclaration: ${idNode.text!}.${propIdNode.text!}`);
         emit.prop(idNode.varId, propIdNode.varId);
         // allConstraints.push(["initProperty", idNode.varId!, propIdNode.varId!, `${idNode.text!}.${propIdNode.text!}`]);
         // allConstraints.push(["takeProperty", propIdNode.varId!, idNode.varId!, `${propIdNode.text!}.${idNode.text!}`]);
@@ -987,13 +1008,17 @@ function secondPass(filePath: string, node: AstNode) {
           } else if (findNodesByKind(node, "ReturnStatement").length === 0) {
             // 如果没有返回类型注解并且没有Return语句
             // funcType.returnType = VOID;
-            emit.returnVoid(propIdNode.varId!);
+            emit.returnVoid(node.varId!);
           } else {
             // funcType.returnType = UNKNOWN;
           }
 
           meta.funcName.set(node.varId!, propIdNode.text!);
           emit.allocFunction(node.varId!, propIdNode.varId!);
+          if (node.varId !== propIdNode.varId) {
+              meta.funcBindMap.set(propIdNode.varId!, node.varId!);
+          }
+          if (propIdNode.text) meta.propName.set(propIdNode.varId!, propIdNode.text);
           emit.prop(idNode.varId!, propIdNode.varId!);
           // //
           // const typeId = newTypeNode(funcType);
@@ -1011,14 +1036,16 @@ function secondPass(filePath: string, node: AstNode) {
         idNode = idNode?.kind === "ObjectLiteralExpression" ? idNode : idNode?.children?.find(n => n.kind === "Identifier");
         if (!idNode || idNode.varId === undefined) return;
 
-          constructors[idNode.varId] = node?.varId!;
-          emit.allocFunction(node.varId!, node.varId!);
-          emit.prop(idNode.varId!, node.varId!);
-          // let funcType: TypeNode = { kind: "function", name: propIdNode?.text!, id: propIdNode?.varId!, params: [], returnType: VOID };
-          // const typeId = newTypeNode(funcType);
-          // setTypeVar(propIdNode.varId!, typeId);
+        console.log(node.text);
+        constructors[idNode.varId] = node?.varId!;
+        emit.allocFunction(node.varId!, node.varId!);
+        meta.propName.set(node.varId!, "constructor");
+        emit.prop(idNode.varId!, node.varId!);
+        // let funcType: TypeNode = { kind: "function", name: propIdNode?.text!, id: propIdNode?.varId!, params: [], returnType: VOID };
+        // const typeId = newTypeNode(funcType);
+        // setTypeVar(propIdNode.varId!, typeId);
 
-          // allConstraints.push(["initProperty", idNode.varId, propIdNode.varId, `${idNode.text}.${propIdNode.text!}`]);
+        // allConstraints.push(["initProperty", idNode.varId, propIdNode.varId, `${idNode.text}.${propIdNode.text!}`]);
       }
     },
     // 处理模块声明
@@ -1064,6 +1091,7 @@ function secondPass(filePath: string, node: AstNode) {
           // allConstraints.push(["sameType", idNode.varId!, 0, `Failed import ${idNode.text} from ${moduleSpecifier}`]);
         } else {
           for (const symb in globalExportMap[resolvedFile]) {
+            meta.propName.set(globalExportMap[resolvedFile][symb], symb);
             emit.prop(idNode.varId!, globalExportMap[resolvedFile][symb]);
             // allConstraints.push(["initProperty", idNode.varId!, globalExportMap[resolvedFile]?.[symb], `${idNode.text!}.${symb}`]);
             // allConstraints.push(["takeProperty", globalExportMap[resolvedFile]?.[symb], idNode.varId!, ``]);
@@ -1193,13 +1221,13 @@ function secondPass(filePath: string, node: AstNode) {
 
   const handlers: Record<string, (node: AstNode) => void> = {
     StringLiteral(node) {
-      emit.allocLiteral(node.varId!, node.text?.replace(/^['"`]|['"`]$/g, "") ?? "unknown text", STRING);
+      emit.allocLiteral(node.varId!, node.text ?? "unknown text", STRING);
       // allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: node.text?.replace(/^['"`]|['"`]$/g, "") ?? "unknown text"}), `${node.text!} ∈ string`]);
       // syntaxNodes[node.varId!].v8kind = "Literal"
       meta.v8Kind.set(node.varId!, "Literal");
     },
     NoSubstitutionTemplateLiteral(node) {
-      emit.allocLiteral(node.varId!, node.text?.replace(/^['"`]|['"`]$/g, "") ?? "unknown text", STRING);
+      emit.allocLiteral(node.varId!, node.text ?? "unknown text", STRING);
       // allConstraints.push(["hasType", node.varId!, newTypeNode({ kind: "literal", value: node.text?.replace(/^['"`]|['"`]$/g, "") ?? "unknown text"}), `${node.text!} ∈ string`]);
     },
     FirstLiteralToken(node) {
@@ -1270,32 +1298,32 @@ function secondPass(filePath: string, node: AstNode) {
     // 处理类型关键字
     NumberKeyword(node) {
       if (node.varId === undefined) return;
-      emit.allocPrimitive(node.varId!, NUMBER);
+      emit.allocPrimitive(node.varId!, tNode.NUMBER);
       // allConstraints.push(["hasType", node.varId, NUMBER, `${node.text!} ∈ number`]);
     },
     StringKeyword(node) {
       if (node.varId === undefined) return;
-      emit.allocPrimitive(node.varId!, STRING);
+      emit.allocPrimitive(node.varId!, tNode.STRING);
       // allConstraints.push(["hasType", node.varId, STRING, `${node.text!} ∈ string`]);
     },
     BooleanKeyword(node) {
       if (node.varId === undefined) return;
-      emit.allocPrimitive(node.varId!, BOOLEAN);
+      emit.allocPrimitive(node.varId!, tNode.BOOLEAN);
       // allConstraints.push(["hasType", node.varId, BOOLEAN, `${node.text!} ∈ boolean`]);
     },
     VoidKeyword(node) {
       if (node.varId === undefined) return;
-      emit.allocPrimitive(node.varId!, VOID);
+      emit.allocPrimitive(node.varId!, tNode.VOID);
       // allConstraints.push(["hasType", node.varId, VOID, `${node.text!} ∈ void`]);
     },
     AnyKeyword(node) {
       if (node.varId === undefined) return;
-      emit.allocPrimitive(node.varId!, ANY);
+      emit.allocPrimitive(node.varId!, tNode.ANY);
       // allConstraints.push(["hasType", node.varId, ANY, `${node.text!} ∈ any`]);
     },
     UndefinedKeyword(node) {
       if (node.varId === undefined) return;
-      emit.allocPrimitive(node.varId!, UNDEFINED);
+      emit.allocPrimitive(node.varId!, tNode.UNDEFINED);
       // allConstraints.push(["hasType", node.varId, UNDEFINED, `${node.text!} ∈ undefined`]);
     },
     // ObjectKeyword(node) {
@@ -1775,7 +1803,7 @@ function secondPass(filePath: string, node: AstNode) {
 
         let funcNode = node.parent;
         while (funcNode && funcNode.kind !== "FunctionDeclaration" && funcNode.kind !== "MethodDeclaration" && funcNode.kind !== "ArrowFunction" && funcNode.kind !== "FunctionExpression") funcNode = funcNode.parent;
-        funcNode = funcNode?.kind === "ArrowFunction" || funcNode?.kind === "FunctionExpression" ? funcNode : funcNode?.children?.find(n => n.kind === "Identifier");
+        // funcNode = funcNode?.kind === "ArrowFunction" || funcNode?.kind === "FunctionExpression" ? funcNode : funcNode?.children?.find(n => n.kind === "Identifier");
 
         if (!funcNode || !funcNode.varId || !exprNode.varId) return;
         if (exprNode.kind === "SemicolonToken") {
@@ -1804,8 +1832,13 @@ function secondPass(filePath: string, node: AstNode) {
           // 处理实参
           const args = node.children.find(n => n.kind === "SyntaxList");
           let idx = 0;
+          // 使用varBindings中的varId（如果存在），以便正确解析函数绑定
+          let funcVarId = funcNode.varId!;
+          if (funcNode.kind === "Identifier" && varBindings.has(funcNode.text!)) {
+            funcVarId = varBindings.get(funcNode.text!)!;
+          }
           for (const arg of args?.children?.filter(n => n.kind !== "CommaToken") ?? []) {
-            emit.arg(funcNode.varId!, arg.varId!, idx);
+            emit.arg(funcVarId, arg.varId!, idx);
             // allConstraints.push(["funcToArg", arg.varId!, funcNode.varId * 1000 + idx, `${node.text}`]);
             idx++;
           }

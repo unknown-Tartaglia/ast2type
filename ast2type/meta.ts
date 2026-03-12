@@ -18,4 +18,7 @@ export class MetaStore {
   enumMemberName = new Map<VarId, string>();
   funcName = new Map<VarId, string>();
   paramName = new Map<VarId, string>();
+  paramIndex = new Map<VarId, number>();
+  funcParamMap = new Map<VarId, Map<number, VarId>>(); // funcVarId -> (paramIdx -> paramVarId)
+  funcBindMap = new Map<VarId, VarId>(); // bindVarId -> funcVarId (标识符绑定到函数)
 }
