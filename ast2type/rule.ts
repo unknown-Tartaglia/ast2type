@@ -85,6 +85,9 @@ class UnaryOpRule implements Rule {
             case "-":
             // 按位非：转换为数字
             case "~":
+            // 自增和自减：结果是数字
+            case "++":
+            case "--":
                 return [{ kind: "genType", node: fact.result, type: tNode.NUMBER }];
             // typeof 操作符：返回字符串
             case "typeof":
@@ -162,8 +165,9 @@ class BinaryOpRule implements Rule {
             case "<<":
             case ">>":
             case ">>>":
-                return [{ kind: "addEdge", from: fact.left, to: fact.result, edgeType: "sameType" },
-                        { kind: "addEdge", from: fact.right, to: fact.result, edgeType: "sameType" }];
+                return [{ kind: "genType", node: fact.result, type: tNode.NUMBER },
+                        { kind: "addEdge", from: fact.result, to: fact.left, edgeType: "sameType" },
+                        { kind: "addEdge", from: fact.result, to: fact.right, edgeType: "sameType" }];
             case "instanceof":
             case "in":
                 // instanceof 和 in 操作符返回布尔值

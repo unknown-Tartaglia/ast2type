@@ -1,14 +1,12 @@
 import * as fs from "fs";
 import * as path from "path";
 import { Command } from "commander";
-import { writeJsonStream } from "./code2ast"
 import { FactStore, Emitter, VarId } from "./ast2type/fact"
 import { MetaStore } from "./ast2type/meta"
 import { Solver } from "./ast2type/solver";
 import { tNodeStore } from "./ast2type/nType";
 import { DeterminantStrategy } from "./ast2type/strategy";
-import { RegularExpressionLiteral } from "ts-morph";
-import { Rule, RuleStore } from "./ast2type/rule";
+import { RuleStore } from "./ast2type/rule";
 
 // 命令行参数解析
 const program = new Command();
@@ -81,7 +79,6 @@ interface AstNode {
 
 // 全局结构
 let typeVarCounter = 100;
-const cnt: Record<number, number> = {};
 const fileToAst: Record<string, AstNode> = {};
 const globalExportMap: Record<string, Record<string, number>> = {};
 const globalExportFa: Record<string, Record<string, string[]>> = {};
@@ -91,7 +88,6 @@ const allConstraints: Array<[string, number, number, string]> = [];
 const globalVarBindings = new Map<string, number>();
 const graph: Map<number, Map<number, string>> = new Map();
 const source: Map<number, Map<number, number>> = new Map();
-const typeSet: Map<number, number> = new Map();
 const parent: Record<number, number> = {};
 const globalImportMap: Map<string, string> = new Map((() => { try { return JSON.parse(fs.readFileSync(path.join(inputDir, "importMap.json"), "utf8")); } catch { return []; } })());
 let worklist: number[] = [];
@@ -101,8 +97,6 @@ const tsMorphNodes = ["BigIntLiteral", "NumericLiteral", "FirstLiteralToken", "N
   "ArrayLiteralExpression", "BinaryExpression", "PrefixUnaryExpression", "PostfixUnaryExpression", "TypeOfExpression", "RegularExpressionLiteral",
   "VoidExpression", "Identifier", "ThisKeyword", "ConditionalExpression", "PropertyAccessExpression", "ElementAccessExpression", "CallExpression",
   "ArrowFunction", "FunctionExpression", "ReturnStatement", "ParenthesizedExpression", "TemplateExpression", "NewExpression"];
-const v8Nodes = ["Literal", "ObjectLiteral", "ArrayLiteral", "BinaryOperation", "UnaryOperation", "CountOperation", "RegExpLiteral", "VariableProxy", 
-  "Conditional", "Property", "Call", "FunctionLiteral", "ReturnStatement", "TemplateLiteral", "CallNew"];
 const start = Date.now();
 const console_methods = ["log", "error", "warn", "info"] as const;
 const operator_cnts : Map<string, number> = new Map();
@@ -197,38 +191,6 @@ function findParentByKind(root: AstNode | undefined, kind: string): AstNode | un
   return findParentByKind(root.parent, kind);
 }
 
-// 递归打印类型
-function printType(n: number): string {
-  const occur: Record<string, number> = {};
-  return helper(n);
-  function helper(n: number): string {
-    const t = typeNodes.get(n);
-    if (!t) {
-      // if (LOG_TYPENODE)
-        console.warn(`Type ID ${n} not found in typeNodes`);
-      return "impossible! type unknown in printType";
-    }
-    switch (t.kind) {
-      case "primitive":
-        return t.name;
-      case "literal":
-        return `literal:${t.value}`;
-      case "array":
-        return helper(t.elementType) + "[]";
-      case "function":
-        // const paramsStr = t.params.map(p => `${p.name}: ${helper(p.type)}`).join(", ");
-        // return `(${paramsStr}) => ${helper(t.returnType)}`;
-        return `function:${t.name}[${t.id}]`;
-      case "object":
-        return `object:${t.name}[${t.id}]`;
-      case "union":
-        return t.types.map(helper).join(" | ");
-      case "enum":
-        return `enum ${t.name} { ${Object.entries(t.members).sort().map(([k, v]) => `${k}=${v}`).join(",")} }`;
-    }
-  }
-}
-
 // 打印完整类型
 function printFullType(n: number): string {
   const occur: Record<string, number> = {};
@@ -272,33 +234,6 @@ function printFullType(n: number): string {
   }
 }
 
-
-function printJsonType(typeId: number): any {
-  const node = typeNodes.get(typeId);
-  if (!node) return "unknown";
-
-  switch (node.kind) {
-    case "primitive":
-      return node.name;
-    case "literal":
-      return (typeof node.value) + " constant";
-    case "union":
-      return Array.from(new Set(node.types.map(t => printJsonType(t))));
-    case "array":
-      return `array`;
-    case "object":
-      return "object";
-    case "enum":
-      return "enum";
-    case "function":
-      return "function"
-    default:
-      return "unknown"
-  }
-}
-
-
-
 // 序列化 TypeNode 为字符串, 确保唯一性
 const hash : Map<TypeNode, string> = new Map();
 function serializeTypeNode(t: TypeNode): string {
@@ -339,10 +274,6 @@ function serializeTypeNode(t: TypeNode): string {
 
 // 反向索引：typeNodeId -> Set<typeVarId>
 const typeNodeUsers: Map<number, Set<number>> = new Map();
-function setTypeVar(vid : number, tid : number) {
-  typeSet.set(vid, tid);
-  typeNodeUsers.set(tid, (typeNodeUsers.get(tid) ?? new Set()).add(vid));
-}
 
 export function newTypeNode(ty: TypeNode): number{
   if (LOG_TYPENODE_VERBOSE)
@@ -441,30 +372,6 @@ function mergeTypes(tys: number[]) : number {
   if (LOG_TYPE_FLOW) 
     console.log(`merge types ${[...tys]} to ${ret}`);
   return ret;
-}
-
-// 合并不同分支类型
-function mergeBranches(node : number, kinds? : string[]) : number {
-  const tys = [];
-  for (const src of source.get(node)?.keys()!) {
-    if (!kinds || kinds && kinds.includes(graph.get(src)?.get(node) ?? "")) {
-      tys.push(source.get(node)!.get(src)!);
-    }
-  }
-  if (LOG_TYPE_FLOW) 
-    console.log(`merge branches at ${node}`)
-  return mergeTypes(tys);
-}
-
-function makePurePropertiesCopy(
-  base: Record<string, number>,
-  extraKey: string,
-  extraVal: number
-): Record<string, number> {
-  const obj = Object.create(null);
-  Object.assign(obj, base);
-  obj[extraKey] = extraVal;
-  return obj;
 }
 
 const meta = new MetaStore();
@@ -1474,6 +1381,7 @@ function secondPass(filePath: string, node: AstNode) {
     TypeOfExpression(node) {
       if (node.children && node.children.length >= 2) {
         meta.v8Kind.set(node.varId!, "UnaryOperation");
+        emit.unaryOp("typeof", node.children[1].varId!, node.varId!);
         // syntaxNodes[node.varId!].v8kind = "UnaryOperation";
         const operator = node.children[0]!;
         const operand = node.children[1]!;
@@ -1483,6 +1391,7 @@ function secondPass(filePath: string, node: AstNode) {
     },
     VoidExpression(node) {
       meta.v8Kind.set(node.varId!, "UnaryOperation");
+      emit.unaryOp("void", node.children?.[0].varId!, node.varId!);
       // syntaxNodes[node.varId!].v8kind = "UnaryOperation";
     },
     YieldExpression(node) {
@@ -2039,444 +1948,6 @@ function resolveImportPath(currentFilePath: string, importSpecifier: string): st
   }
 }
 
-// // 求解类型图
-// function deriveVariableTypes() {
-//   for (let [kind, a, b] of allConstraints) {
-//     a = find(Number(a));
-//     if (kind === "hasType") {
-//       if (meta.kind.get(a) === "Identifier") {
-//         graph.set(a, graph.get(a) ?? new Map());
-//       }
-//       setTypeVar(a, b); source.set(a, new Map());
-//     } else if (kind !== "sameID") {
-//       if (kind === "funcToArg") {
-//         const func = find(Math.floor(b / 1000));
-//         const idx = b % 1000;
-//         // if (!funcParam[func]?.[idx]) {
-//         //   console.log(`Can not find Correspond param #${idx} of function ${syntaxNodes[func]?.text!}[${func}]`);
-//         //   continue;
-//         // } else {
-//         //   console.log(`Find Correspond param #${idx} of function ${syntaxNodes[func]?.text!}[${func}]`);
-//         // }
-//         a = a * 1000 + idx;
-//         b = func;
-//       }
-//       b = find(Number(b));
-//       if (b === a) continue; // 避免自引用
-//       graph.set(b, graph.get(b) ?? new Map()); graph.get(b)!.set(a, kind);
-//       source.set(a, source.get(a) ?? new Map()); source.get(a)!.set(b, UNKNOWN);
-//       if (kind === "setParamType" || kind === "initProperty") {
-//         setTypeVar(b, typeSet.get(b) ?? UNKNOWN);
-//       }
-//     }
-//   }
-
-//   worklist = Array.from(graph.keys()).filter(n => typeSet.get(n) !== undefined);
-//   while (worklist.length > 0) {
-//     const cur = worklist.pop()!;
-//     cnt[cur] = (cnt[cur] ?? 0) + 1;
-//     if (cnt[cur] > 20000) {
-//       console.warn(`Node ${cur} has too many iterations (${cnt[cur]}), possible infinite loop`);
-//       break;
-//     }
-//     if (LOG_TYPE_FLOW) {
-//       console.log(`Processing node ${cur} (${meta.text.get(cur)}) with ${cnt[cur]} iterations, worklist size: ${worklist.length}, node edges ${graph.get(cur)?.size ?? 0}`);
-
-//       // 输出 Types
-//       if (typeSet.get(cur)) {
-//         console.log(`  Type (raw): ${typeSet.get(cur)}`);
-//         console.log(`  Type: ${JSON.stringify(typeNodes.get(typeSet.get(cur)!))}`);
-//       } else {
-//         console.log(`  Type: no types`);
-//       }
-//     }
-
-//     let tSet = typeSet.get(cur);
-//     if(!tSet) {
-//       console.warn(`node ${cur} with no type`);
-//       continue;
-//     }
-//     const edges = graph.get(cur);
-//     if (!edges) continue;
-//     for (const next of edges.keys()) {
-//       const nSet = typeSet.get(next);
-//       const edgeKind = graph.get(cur)!.get(next)!;
-//       if (LOG_TYPE_FLOW) {
-//         console.log(`  Processing edge ${cur} -> ${next} of kind ${edgeKind}, merge difficulty: ${source.get(next)?.size ?? 0}`);
-//       }
-
-//       //  数据流处理
-//       if (edgeKind === "sameType" || edgeKind === "ArgToParam" || edgeKind === "annotation") {
-//         if (edgeKind === "annotation" && syntaxNodes[cur].file && !path.relative(process.cwd(), syntaxNodes[cur].file).split(path.sep).includes("sdk")) continue;
-//         // 如果是同类型
-//         source.get(next)!.set(cur, tSet);
-//         setTypeVar(next, mergeBranches(next));
-//       }
-//       else if (edgeKind === "makeArray") {
-//         // 如果是数组类型，添加元素类型
-//         if (nSet === undefined) {
-//           console.warn(`makeArray on undefined type in edge ${cur}->${next}`);
-//         } else {
-//           const typeNode = typeNodes.get(nSet);
-//           if (typeNode === undefined || typeNode.kind !== "array") {
-//             console.warn(`makeArray on non-array type ${printType(nSet)} in edge ${cur}->${next}`);
-//             continue;
-//           }
-//           source.get(next)!.set(cur, tSet);
-//           const id = newTypeNode({ kind: "array", elementType: mergeBranches(next) });
-//           setTypeVar(next, id);
-//         }
-//       }
-//       else if (edgeKind === "takeProperty") {
-//         // 如果是取属性，添加属性类型
-//         if (!syntaxNodes[next]?.text) {
-//           console.error(`fail to takeProperty because text size too short`);
-//           continue;
-//         } else {
-//           const propName = syntaxNodes[next]?.text.split(".").pop();
-//           const typeNode = typeNodes.get(tSet);
-//           if (propName && typeNode && typeNode.kind == "object" && propName in typeNode.properties) {
-//             source.get(next)?.set(cur, typeNode.properties[propName]);
-//             if (LOG_TYPE_FLOW)
-//               console.log(`takeProperty[object] ${typeNode.properties[propName]} for ${propName} in edge ${cur}->${next}`);
-//           } else if (propName && typeNode && typeNode.kind == "enum" && propName in typeNode.members) {
-//             source.get(next)?.set(cur, typeNode.members[propName]);
-//             if (LOG_TYPE_FLOW)
-//               console.log(`takeProperty[enum] ${typeNode.members[propName]} for ${propName} in edge ${cur}->${next}`);
-//           } else if (typeNode && typeNode.kind == "union") {
-//             let lst = [];
-//             for (const subtype of typeNode.types) {
-//               const subtypeNode = typeNodes.get(subtype);
-//               if (propName && subtypeNode && subtypeNode.kind == "object" && propName in subtypeNode.properties) {
-//                 lst.push(subtypeNode.properties[propName]);
-//                 if (LOG_TYPE_FLOW)
-//                   console.log(`takeProperty[union-object] ${subtypeNode.properties[propName]} for ${propName} in edge ${cur}->${next}`);
-//               } else if (propName && subtypeNode && subtypeNode.kind == "enum" && propName in subtypeNode.members) {
-//                 lst.push(subtypeNode.members[propName]);
-//                 if (LOG_TYPE_FLOW)
-//                   console.log(`takeProperty[union-enum] ${subtypeNode.members[propName]} for ${propName} in edge ${cur}->${next}`);
-//               } else {
-//                 lst.push(UNDEFINED);
-//               }
-//             }
-//             if (lst.length > 0) {
-//               source.get(next)!.set(cur, mergeTypes(lst));
-//             } else {
-//               console.warn(`Unexpected takeProperty when type ${tSet} : ${printType(tSet)} has no object or enum subtype with property ${propName} in edge ${cur}->${next}`);
-//             }
-//           } else {
-//             source.get(next)!.set(cur, UNDEFINED);
-//           }
-//         }
-//         setTypeVar(next, mergeBranches(next));
-//       }
-//       else if (edgeKind === "elementAccess") {
-//         // 取数组成员
-//         const typeNode = typeNodes.get(tSet);
-//         if (typeNode?.kind === "array") {
-//           source.get(next)!.set(cur, mergeTypes([typeNode.elementType, UNDEFINED]));
-//         } else if (typeNode?.kind === "primitive" && typeNode.name === "string") {
-//           source.get(next)!.set(cur, mergeTypes([STRING, UNDEFINED]));
-//         } else if (typeNode?.kind === "object") {
-//           let propName = syntaxNodes[next]?.text?.split("[").pop()?.split("]")[0];
-//           // 只判断字符串或者数字属性
-//           if (propName && (propName.startsWith('"') && propName.endsWith('"') || propName.startsWith("'") && propName.endsWith("'") || /^\d+$/.test(propName))) {
-//             const cleanPropName = (propName.startsWith('"') && propName.endsWith('"') || propName.startsWith("'") && propName.endsWith("'")) ? propName.slice(1, -1) : propName;
-//             const propType = typeNode.properties[cleanPropName];
-//             if (propType) {
-//               source.get(next)!.set(cur, propType);
-//               if (LOG_TYPE_FLOW)
-//                 console.log(`elementAccess[object] ${propType} for ${cleanPropName} in edge ${cur}->${next}`);
-//             }
-//           }
-//         }
-//         else if (typeNode?.kind === "union") {
-//           let lst = [];
-//           for (const subtype of typeNode.types) {
-//             const subtypeNode = typeNodes.get(subtype);
-//             if (subtypeNode?.kind === "array") {
-//               lst.push(subtypeNode.elementType);
-//               lst.push(UNDEFINED);
-//             } else if (subtypeNode?.kind === "primitive" && subtypeNode.name === "string") {
-//               lst.push(mergeTypes([STRING, UNDEFINED]));
-//             } else if (subtypeNode?.kind === "object") {
-//               const propName = syntaxNodes[cur]?.text?.split("[").pop()?.split("]")[0];
-//               if (propName && (propName.startsWith('"') && propName.endsWith('"') || propName.startsWith("'") && propName.endsWith("'"))) {
-//                 const cleanPropName = propName.slice(1, -1);
-//                 const propType = subtypeNode.properties[cleanPropName];
-//                 if (propType) {
-//                   lst.push(propType);
-//                   if (LOG_TYPE_FLOW)
-//                     console.log(`elementAccess[union-object] ${propType} for ${cleanPropName} in edge ${cur}->${next}`);
-//                 }
-//               }
-//             }
-//           }
-//           if (lst.length > 0) {
-//             source.get(next)!.set(cur, mergeTypes(lst));
-//           } else {
-//             console.warn(`Unexpected elementAccess when type ${tSet} : ${printType(tSet)} has no array or object subtype in edge ${cur}->${next}`);
-//           }
-//         } else {
-//           console.warn(`Unexpected elementAccess when type ${tSet} : ${printType(tSet)} is not array or object in edge ${cur}->${next}`);
-//         }
-//         setTypeVar(next, mergeBranches(next));
-//       }
-//       else if (edgeKind === "funcCall") {
-//         // 如果是函数调用，添加函数返回类型
-//         const typeNode = typeNodes.get(tSet);
-//         if (typeNode?.kind === "function") {
-//           source.get(next)!.set(cur, typeNode.returnType);
-//         } else {
-//           console.warn(`Unexpected funcCall when type ${tSet} : ${printType(tSet)} is not function in edge ${cur}->${next}`);
-//         }
-//         setTypeVar(next, mergeBranches(next));
-//       }
-        
-
-
-
-//       // 控制流处理
-//       else if(edgeKind === "funcToArg") {
-//         const ty = typeNodes.get(tSet);
-//         const arg = find(Math.floor(next / 1000));
-//         const idx = next % 1000;
-//         let func;
-//         if (!ty) {
-//           console.error(`error: function Node ${syntaxNodes[cur].text}[${cur}] with null type!`);
-//           continue;
-//         }
-//         if (ty.kind === "union") {
-//           let f = ty.types.find(n => typeNodes.get(n)!.kind === "function");
-//           if (f) {
-//             const typeNode = typeNodes.get(f)!;
-//             if (typeNode.kind === "function") {
-//               func = typeNode.id;
-//               console.warn(`Unexpected Union type of function ${syntaxNodes[cur].text!}[${cur}], use initial node ${func}`);
-//             } else {
-//               console.error(`error: function Node ${syntaxNodes[cur].text}[${cur}] without function type!`);
-//               continue;
-//             }
-//           }
-//         }
-//         if (ty.kind === "function") {
-//           func = ty.id;
-//         }
-//         if (!func) {
-//           console.error(`error: function Node ${syntaxNodes[cur].text}[${cur}] without function type!`);
-//           continue;
-//         }
-//         const param = funcParam[func]?.[idx];
-//         if (!param) { 
-//           console.log(`Can not find Correspond param #${idx} of function ${syntaxNodes[func]?.text!}[${func}]`);
-//           continue;
-//         }
-
-//         // 擦除边，构建新边（默认function的id不会变）
-//         graph.get(cur)!.delete(next);
-//         graph.set(arg, graph.get(arg) ?? new Map());
-//         graph.get(arg)!.set(param, "ArgToParam");
-//         source.set(param, source.get(param) ?? new Map());
-//         source.get(param)!.set(arg, UNKNOWN);
-//         worklist.push(arg);
-//         continue;
-//       }
-//       else if (edgeKind === "initProperty") {
-//         // 如果是设置属性，添加属性类型
-//         const propName = syntaxNodes[cur]?.text;
-
-
-//         if (nSet === undefined) {
-//           console.warn(`initProperty on undefined type in edge ${cur}->${next}`);
-//           continue;
-//         }
-//         const typeNode = typeNodes.get(nSet);
-//         if (typeNode === undefined || typeNode.kind !== "object") {
-//           console.warn(`initProperty on non-object type ${printType(nSet)} in edge ${cur}->${next}`);
-//           continue;
-//         }
-//         if (!propName) {
-//           console.warn(`initProperty with no propName in edge ${cur}->${next}`);
-//           continue;
-//         }
-
-
-//         const id = newTypeNode({ kind: "object", name: typeNode.name, id: typeNode.id, properties: makePurePropertiesCopy(typeNode.properties, propName, tSet)});
-//         setTypeVar(next, id);
-//       }
-//       else if (edgeKind === "setProperty") {
-//         // 如果是设置属性，添加属性类型
-//         const propName = syntaxNodes[cur].text?.split(".").pop();
-
-//         if (!propName) {
-//           console.warn(`setProperty with no propName in edge ${cur}->${next}`);
-//           continue;
-//         }
-
-//         if (nSet === undefined) {
-//           console.warn(`setProperty on undefined type in edge ${cur}->${next}`);
-//           continue;
-//         }
-
-//         const typeNode = typeNodes.get(nSet);
-//         if (typeNode === undefined) continue;
-
-//         if (typeNode.kind === "object") {
-//           const dstty = typeNode?.kind === "object" ? typeNode.properties[propName!] ? mergeTypes([typeNode.properties[propName!], tSet]) : tSet : tSet;
-//           const id = newTypeNode({ kind: "object", name: typeNode.name, id: typeNode.id, properties: makePurePropertiesCopy(typeNode.properties, propName!, dstty) });
-//           setTypeVar(next, id);
-//         } else if (typeNode.kind === "union") {
-//           let updated = false;
-//           const newTypes = typeNode.types.map(t => {
-//             const tynd = typeNodes.get(t);
-//             if (tynd?.kind === "object") {
-//               const dstty = tynd.properties[propName!] ? mergeTypes([tynd.properties[propName!], tSet]) : tSet;
-//               const id = newTypeNode({ kind: "object", name: tynd.name, id: tynd.id, properties: makePurePropertiesCopy(tynd.properties, propName!, dstty) });
-//               updated = true;
-//               return id;
-//             } else {
-//               return t;
-//             }
-//           });
-//           if (updated) {
-//             setTypeVar(next, newTypeNode({ kind: "union", types: newTypes }));
-//           } else {
-//             console.warn(`setProperty on union type without object member ${printType(nSet)} in edge ${cur}->${next}`);
-//           }
-//         }
-//       }
-//       else if (edgeKind === "setElement") {
-//         // 取a[b]中的b
-//         const propName = syntaxNodes[cur].text?.split("[").pop()?.split("]").shift();
-//         if (!propName) {
-//           console.warn(`setElement with no propName in edge ${cur}->${next}`);
-//           continue;
-//         }
-
-//         if (nSet === undefined) {
-//           console.warn(`setElement on undefined type in edge ${cur}->${next}`);
-//           continue;
-//         }
-
-//         const typeNode = typeNodes.get(nSet);
-//         if (typeNode === undefined) continue;
-
-//         if (typeNode.kind === "object") {
-//           if (propName.startsWith('"') && propName.endsWith('"') || propName.startsWith("'") && propName.endsWith("'")) {
-//             const cleanPropName = propName.slice(1, -1);
-//             const dstty = typeNode?.kind === "object" ? typeNode.properties[cleanPropName] ? mergeTypes([typeNode.properties[cleanPropName], tSet]) : tSet : tSet;
-//             const id = newTypeNode({ kind: "object", name: typeNode.name, id: typeNode.id, properties: makePurePropertiesCopy(typeNode.properties, cleanPropName, dstty) });
-//             setTypeVar(next, id);
-//           }
-
-//         } else if (typeNode.kind === "array") {
-//           const idx = Number(propName);
-//           if (isNaN(idx)) {
-//             console.warn(`setElement with non-numeric index ${propName} in edge ${cur}->${next}`);
-//             continue;
-//           }
-//           const dstty = mergeTypes([typeNode.elementType, tSet]);
-//           const id = newTypeNode({ kind: "array", elementType: dstty });
-//           setTypeVar(next, id);
-//         } else if (typeNode.kind === "union") {
-//           let updated = false;
-//           const newTypes = typeNode.types.map(t => {
-//             const tynd = typeNodes.get(t);
-//             if (tynd?.kind === "object") {
-//               const dstty = tynd.properties[propName!] ? mergeTypes([tynd.properties[propName!], tSet]) : tSet;
-//               const id = newTypeNode({ kind: "object", name: tynd.name, id: tynd.id, properties: makePurePropertiesCopy(tynd.properties, propName!, dstty) });
-//               updated = true;
-//               return id;
-//             } else if (tynd?.kind === "array") {
-//               const idx = Number(propName);
-//               if (isNaN(idx)) {
-//                 console.warn(`setElement with non-numeric index ${propName} in edge ${cur}->${next}`);
-//                 return t;
-//               }
-//               const dstty = mergeTypes([tynd.elementType, tSet]);
-//               const id = newTypeNode({ kind: "array", elementType: dstty });
-//               updated = true;
-//               return id;
-//             } else {
-//               return t;
-//             }
-//           });
-//           if (updated) {
-//             setTypeVar(next, newTypeNode({ kind: "union", types: newTypes }));
-//           } else {
-//             console.warn(`setElement on union type without object or array member ${printType(nSet)} in edge ${cur}->${next}`);
-//           }
-//         }
-//       }
-//       else if (edgeKind === "setParamType") {
-//         // 如果是参数类型，添加参数类型
-//         const paramName = syntaxNodes[cur]?.text;
-
-
-//         if (nSet === undefined) {
-//           console.warn(`setParamType on undefined type in edge ${cur}->${next}`);
-//           continue;
-//         }
-//         const typeNode = typeNodes.get(nSet);
-//         if (typeNode === undefined || typeNode.kind !== "function") {
-//           console.warn(`setParamType on non-function type ${printType(nSet)} in edge ${cur}->${next}`);
-//           continue;
-//         }
-//         if (!paramName) {
-//           console.warn(`Parameter name not found in edge ${cur}->${next}`);
-//           continue;
-//         }
-
-
-//         // source[next][cur] = tSet;
-//         // let tylist : number[]  = [];
-//         // for(const srcStr in source[next]) {
-//         //   const src = Number(srcStr);
-//         //   const curParamName = syntaxNodes[src]?.text;
-//         //   if (curParamName !== paramName) continue;
-//         //   tylist.push(source[next][src]);
-//         // }
-//         setTypeVar(next, newTypeNode({ kind: "function", name: typeNode.name, id: typeNode.id, params: [...typeNode.params.filter(pa => pa.name !== paramName), {name: paramName, type: /* mergeTypes(tylist) */tSet}], returnType: typeNode.returnType }));
-//       }
-//       else if (edgeKind === "returnType" || edgeKind === "returnAnnotation") {
-//         if (edgeKind === "returnAnnotation" && syntaxNodes[cur].file && !path.relative(process.cwd(), syntaxNodes[cur].file).split(path.sep).includes("sdk")) continue;
-//         // 如果是返回类型，添加返回类型
-//         if (nSet === undefined) {
-//           console.warn(`returnType or returnAnnotation on undefined type in edge ${cur}->${next}`);
-//           continue;
-//         }
-//         const typeNode = typeNodes.get(nSet);
-//         if (typeNode === undefined || typeNode.kind !== "function") {
-//           console.warn(`returnType or returnAnnotation on non-function type ${printType(nSet)} in edge ${cur}->${next}`);
-//           continue;
-//         }
-
-//         source.get(next)!.set(cur, tSet);
-//         setTypeVar(next, newTypeNode({ kind: "function", name: typeNode.name, id: typeNode.id, params: typeNode.params, returnType: mergeBranches(next, ["returnType"/* , "returnAnnotation" */]) }));
-//       }
-
-
-
-
-//       // 更新传播
-//       if(typeSet.get(next) !== nSet && typeSet.get(next) !== UNKNOWN) worklist.push(next);
-//     }
-//   }
-
-//   // 传递sameID类型
-//   for (const [kind, a, b] of allConstraints) {
-//     if (kind === "sameID" && typeSet.get(b)) {
-//       setTypeVar(a, typeSet.get(b)!);
-//     }
-//   }
-
-//   const result: Record<string, string> = {};
-//   for (const [name, id] of globalVarBindings.entries()) {
-//     result[name] = printType(typeSet.get(id) ?? UNKNOWN);
-//   }
-//   return result;
-// }
-
 function find(x: number): number {
   if (parent[x] === undefined) return x;
   if (parent[x] !== x) parent[x] = find(parent[x]);
@@ -2491,120 +1962,6 @@ function union(x: number, y: number) {
     funcParam[rootX] = funcParam[rootY];
   }
 }
-
-// 合并标识符
-function mergeIdentifiers() {
-  for (const [kind, a, b] of allConstraints) {
-    if (kind === "sameID") {
-      // 合并标识符
-      union(a, b);
-    }
-  }
-}
-
-// // 验证 groundtruth
-// function evaluate() {
-//   console.log("========== Evaluating type graph consistency ==========");
-
-//   const result = {
-//     total: 0,
-//     correct: 0,
-//     wrong: 0,
-//     missing: 0,
-//     any: 0, // 统计any出现次数
-//     unknown: 0, // 统计无法判断类型的注释出现次数
-//     wrongEdges: [] as { kind: string, a: number, b: number, aType: string, bType: string }[],
-//   };
-
-//   // 遍历类型图中的所有约束
-//   for (const [kind, a, b] of allConstraints) {
-//     if (kind !== "annotation" && kind !== "returnAnnotation") continue;
-
-//     const aId = find(Number(a));
-//     const bId = find(Number(b));
-//     // 不统计库文件
-//     if (!syntaxNodes[aId].file || path.relative(process.cwd(), syntaxNodes[aId].file).split(path.sep).includes("sdk")) continue;
-//     result.total++;
-
-
-//     let aType =  printType(typeSet.get(aId) ?? UNKNOWN);
-//     if (kind === "returnAnnotation") {
-//       const ty = typeNodes.get(typeSet.get(aId) ?? UNKNOWN);
-//       if (ty && ty.kind === "function") {
-//         const retType = ty.returnType;
-//         aType = printType(retType)
-//       }
-//     }
-//     const bType = printType(typeSet.get(bId) ?? UNKNOWN);
-
-//     // === (1) 跳过 other 类型比较 ===
-//     const isAny = (t: string) => /^any(\[\])?$/.test(t);
-//     if (isAny(bType)) {
-//       result.any++;
-//       continue; // 不计入正确或错误
-//     } else if(bType === "unknown") {
-//       result.unknown++;
-//       console.log(`${[kind, a, b]}`)
-//       continue;
-//     }
-
-//     // === (2) 比较类型一致性 ===
-//     if (aType === "unknown") {
-//       result.missing++;
-//       result.wrongEdges.push({ kind, a: aId, b: bId, aType, bType });
-//       // console.warn(`[EVAL] Can not predict type on ${kind} edge ${aId}->${bId}, expected ${bType}`);
-//     } else if (aType === bType) {
-//       result.correct++;
-//       console.log(`[EVAL] Match on ${kind} edge ${syntaxNodes[aId].text}[${aId}]->${syntaxNodes[bId].text}[${bId}]: ${bType}`);
-//     } else {
-//       result.wrong++;
-//       result.wrongEdges.push({ kind, a: aId, b: bId, aType, bType });
-//       // console.warn(`[EVAL] Mismatch on ${kind} edge ${aId}->${bId}: inferred ${aType}, expected ${bType}`);
-//     }
-//   }
-
-//   // === (3) 输出汇总报告 ===
-//   const other = result.any + result.unknown;
-//   const acc = result.correct / Math.max(1, (result.total - other - result.missing));
-//   const cov = (result.correct + result.wrong) / (result.total - other);
-//   console.log("========== Evaluation Report ==========");
-//   console.log(`Total annotations: ${result.total}`);
-//   console.log(`Correct: ${result.correct}`);
-//   console.log(`Wrong: ${result.wrong}`);
-//   console.log(`Missing: ${result.missing}`);
-//   console.log(`Ignored: any * ${result.any} + unknown * ${result.unknown} = ${other}`);
-//   console.log(`coverage: ${(cov * 100).toFixed(2)}%`);
-//   console.log(`Effective accuracy: ${(acc * 100).toFixed(2)}%`);
-
-//   // === (4) 输出详细错误列表 ===
-//   if (result.wrongEdges.length > 0) {
-//     console.log("\n--- Type mismatches ---");
-//     for (const w of result.wrongEdges) {
-//       const aText = syntaxNodes[w.a]?.text ?? `(node ${w.a})`;
-//       const bText = syntaxNodes[w.b]?.text ?? `(node ${w.b})`;
-//       if (w.aType === "unknown") continue;
-//       console.log(
-//         `  [${w.kind}] ${aText}[${w.a}] (${w.aType})  !==  ${bText} (${w.bType})`
-//       );
-//     }
-//   }
-
-//   // === (5) 输出遗漏列表 ===
-//   if (result.wrongEdges.length > 0) {
-//     console.log("\n--- Type underived ---");
-//     for (const w of result.wrongEdges) {
-//       const aText = syntaxNodes[w.a]?.text ?? `(node ${w.a})`;
-//       const bText = syntaxNodes[w.b]?.text ?? `(node ${w.b})`;
-//       if (w.aType !== "unknown") continue;
-//       console.log(
-//         `  [${w.kind}] ${aText}[${w.a}] (${w.aType})  !==  ${bText} (${w.bType})`
-//       );
-//     }
-//   }
-
-//   return result;
-// }
-
 
 // // 输出图和约束
 // function emitGlobalTypeGraphAndConstraints() {
@@ -2693,74 +2050,6 @@ function mergeIdentifiers() {
 //     return { nodes, edges };
 //   }
 
-
-//   function generateTypeAnno() {
-//     const outJson = [];
-//     for (const idstr in syntaxNodes) {
-//       const id = Number(idstr)
-//       const node = syntaxNodes[id];
-//       const t = printJsonType(typeSet.get(id) ?? UNKNOWN);
-//       const ty = typeNodes.get(typeSet.get(id) ?? UNKNOWN);
-//       if (t === "unknown" || !node.v8kind || node.v8kind === "invisible" || node.offset === -1) continue;
-//       outJson.push({
-//         context: node.context,
-//         exprText: node.text,
-//         exprKind: node.v8kind,
-//         morphKind: node.kind,
-//         location: node.offset,
-//         pos: node.position,
-//         type: t,
-//         constant: ty?.kind === "literal" ? ty.value : undefined,
-//         relapath: node.file!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, ""),
-//         file: path.join(node.file!.split("ast" + require("path").sep)[0].replace("_output", ""), node.file!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")),
-//       })
-//     }
-//     return outJson;
-//   }
-// }
-
-
-// 主流程
-// function main() {
-//   // 创建一个虚拟节点，表示未知的导入
-//   syntaxNodes[0] = { kind: "null", text: "unknown import hole", file: "null", position: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, offset: -1 };
-//   // 手动初始化内置类型节点
-//   typeNodes.set(NUMBER, { kind: "primitive", name: "number" });
-//   typeNodes.set(STRING, { kind: "primitive", name: "string" });
-//   typeNodes.set(BOOLEAN, { kind: "primitive", name: "boolean" });
-//   typeNodes.set(ANY, { kind: "primitive", name: "any" });
-//   typeNodes.set(UNKNOWN, { kind: "primitive", name: "unknown" });
-//   typeNodes.set(VOID, { kind: "primitive", name: "void" });
-//   typeNodes.set(NULL, { kind: "primitive", name: "null" });
-//   typeNodes.set(UNDEFINED, { kind: "primitive", name: "undefined" });
-//   typeNodes.set(NEVER, { kind: "primitive", name: "never" });
-//   typeNodes.set(REGEXP, { kind: "primitive", name: "RegExp" });
-//   typeNodes.set(BIGINT, { kind: "primitive", name: "bigint" });
-//   // 初始化类型集合
-//   setTypeVar(VOID, VOID)
-//   // 初始化typeNodeReverseMap
-//   for (const [id, node] of typeNodes.entries()) {
-//     typeNodeReverseMap.set(serializeTypeNode(node), Number(id));
-//   }
-
-
-//   const astFiles = getAstFiles(inputDir);
-//   for (const file of astFiles) {
-//     const ast = JSON.parse(fs.readFileSync(file, "utf8"));
-//     firstPass(file, ast);
-//   }
-//   // 控制台输出globalExportMap
-//   if (LOG_IMPORT)
-//     console.log("Global Export Map:", JSON.stringify(globalExportMap, null, 2));
-//   for (const file of astFiles) {
-//     secondPass(file, fileToAst[file]);
-//   }
-
-//   mergeIdentifiers();
-//   emitGlobalTypeGraphAndConstraints();
-//   if (LOG_TYPE_STCS) analyzeIdentifierTypeFeatures();
-//   if (LOG_OPERATOR_STCS) analyzeOperators();
-// }
 function main() {
 
   const astFiles = getAstFiles(inputDir);
@@ -2793,142 +2082,5 @@ function getAstFiles(dir: string): string[] {
 }
 
 main();
-
-// // ===== 基于变量节点的类型特征分析 =====
-// function analyzeIdentifierTypeFeatures() {
-//   console.log("📊 Identifier Type Feature Analysis Starting...");
-
-//   const stats = {
-//     primitive: 0,
-//     object: 0,
-//     func: 0,
-//     array: 0,
-//     union: 0,
-//     unknown: 0,
-//     funcParamTotal: 0,
-//     funcCount: 0,
-//     crossFileRefs: 0,
-//     totalNodes: 0,
-//   };
-
-//   // 只保留 Identifier 节点
-//   const identifierNodes = Object.entries(syntaxNodes)
-//     .filter(([_, node]) => node.kind === "Identifier" && node.file && !path.relative(process.cwd(), node.file).split(path.sep).includes("sdk"))
-//     .map(([id]) => Number(id));
-
-//   for (const id of identifierNodes) {
-//     const tyId = typeSet.get(id) ?? UNKNOWN;
-//     const tyNode = typeNodes.get(tyId);
-
-//     stats.totalNodes++;
-//     if (!tyNode) {
-//       stats.unknown++;
-//     } else {
-//       switch (tyNode.kind) {
-//         case "primitive": if(tyNode.name !== "unknown") stats.primitive++; else stats.unknown++; break;
-//         case "object": stats.object++; break;
-//         case "function":
-//           stats.func++;
-//           stats.funcCount++;
-//           stats.funcParamTotal += tyNode.params?.length || 0;
-//           break;
-//         case "array": stats.array++; break;
-//         case "union": stats.union++; break;
-//       }
-//     }
-//   }
-
-//   // 跨文件引用统计：只要一条边跨文件，就算一次
-//   for (const [srcStr, dsts] of Object.entries(graph)) {
-//     const src = Number(srcStr);
-//     const srcFile = syntaxNodes[src]?.file;
-//     if (!srcFile) continue;
-
-//     for (const dstStr in dsts) {
-//       const dst = Number(dstStr);
-//       const dstFile = syntaxNodes[dst]?.file;
-//       if (!dstFile || srcFile === dstFile) continue;
-//       stats.crossFileRefs++;
-//     }
-//   }
-
-//   const result = {
-//     totalNodes: stats.totalNodes,
-//     primitive: { count: stats.primitive, percent: ((stats.primitive / stats.totalNodes) * 100).toFixed(1) },
-//     object: { count: stats.object, percent: ((stats.object / stats.totalNodes) * 100).toFixed(1) },
-//     function: { count: stats.func, percent: ((stats.func / stats.totalNodes) * 100).toFixed(1) },
-//     array: { count: stats.array, percent: ((stats.array / stats.totalNodes) * 100).toFixed(1) },
-//     union: { count: stats.union, percent: ((stats.union / stats.totalNodes) * 100).toFixed(1) },
-//     unknown: { count: stats.unknown, percent: ((stats.unknown / stats.totalNodes) * 100).toFixed(1) },
-//     "avg function params": (stats.funcParamTotal / (stats.funcCount || 1)).toFixed(2),
-//     "cross-file refs ": stats.crossFileRefs,
-//   };
-
-//   // 控制台输出
-//   console.log("========== Identifier Type Feature Report ==========");
-//   console.log(`Total Identifier nodes: ${result.totalNodes}`);
-//   for (const [k, v] of Object.entries(result)) {
-//     if (typeof v === "object") {
-//       console.log(`${k.padEnd(22)} ${v.count} nodes, ${v.percent}%`);
-//     } else {
-//       console.log(`${k.padEnd(22)} ${v}`);
-//     }
-//   }
-
-//   return result;
-// }
-
-// // ===== 分析操作符 =====
-// function analyzeOperators() {
-//   let total_operators = 0;
-//   let needed_operators = 0;
-//   let total_operands = 0;
-//   const map = new Map<string, Map<string, number>>();
-//   const map_cnt = new Map<string, number>();
-
-//   for (const [key, value] of operator_cnts.entries()) {
-//     total_operators += value;
-//     if (["==", "===", "!=", "!==", "!", "typeof"].includes(key)) needed_operators += value;
-//   }
-
-//   for (const [key, value] of operator_cnts.entries()) {
-//     console.log(`Operator ${key}: ${value} occurrences, ${(value / total_operators * 100).toFixed(2)}%`);
-//   }
-
-//   for (const [key, value] of operands.entries()) {
-//     if (["==", "===", "!=", "!==", "!", "typeof"].includes(key)) {
-//       for (const v of value) {
-//         if (!syntaxNodes[v].v8kind) continue;
-//         const tyNode = typeNodes.get(typeSet.get(v) ?? UNKNOWN);
-//         if (!tyNode) continue;
-//         total_operands++;
-//         let name;
-//         switch (tyNode.kind) {
-//           case "primitive": name = tyNode.name; break;
-//           case "object":
-//           case "function":
-//           case "array":
-//           case "union": name = tyNode.kind; break;
-//           default: name = "unknown"; break;
-//         }
-//         if (!map.has(key)) map.set(key, new Map<string, number>());
-//         const submap = map.get(key)!;
-//         submap.set(name, (submap.get(name) ?? 0) + 1);
-//         map_cnt.set(key, (map_cnt.get(key) ?? 0) + 1);
-//       }
-//     }
-//   }
-
-//   console.log("========== Operator Operand Type Report ==========");
-//   console.log(`Needed operator / Total operator = ${needed_operators} / ${total_operators} = ${((needed_operators / total_operators) * 100).toFixed(2)}%`);
-//   console.log(`Total operands for needed operators: ${total_operands}`);
-//   for (const [key, val] of map) {
-//     console.log(`-- Operator: ${key} --`);
-//     const tot = map_cnt.get(key)!;
-//     for (const [k, v] of val) {
-//       console.log(`   Type ${k}: ${v} occurrences, ${((v / tot) * 100).toFixed(2)}%`);
-//     }
-//   }
-// }
 
 export {tNode, solver, outputDir, meta};
