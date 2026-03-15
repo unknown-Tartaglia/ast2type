@@ -416,15 +416,6 @@ export class TypeGraph {
         const acc = result.correct > 0 ? result.correct / (result.correct + result.wrong) : 0;
         const cov = result.correct + result.wrong > 0 ? (result.correct + result.wrong) / (result.correct + result.wrong + result.missing) : 0;
 
-        console.log("========== Evaluation Report ==========");
-        console.log(`Total annotations: ${result.total}`);
-        console.log(`Correct: ${result.correct}`);
-        console.log(`Wrong: ${result.wrong}`);
-        console.log(`Missing: ${result.missing}`);
-        console.log(`Ignored: any * ${result.any} + unknown * ${result.unknown} = ${other}`);
-        console.log(`Coverage: ${(cov * 100).toFixed(2)}%`);
-        console.log(`Effective accuracy: ${(acc * 100).toFixed(2)}%`);
-
         // 输出正确的边列表
         if (result.rightEdges.length > 0) {
             console.log("\n--- Correct annotations ---");
@@ -461,6 +452,15 @@ export class TypeGraph {
                 );
             }
         }
+
+        console.log("========== Evaluation Report ==========");
+        console.log(`Total annotations: ${result.total}`);
+        console.log(`Correct: ${result.correct}`);
+        console.log(`Wrong: ${result.wrong}`);
+        console.log(`Missing: ${result.missing}`);
+        console.log(`Ignored: any * ${result.any} + unknown * ${result.unknown} = ${other}`);
+        console.log(`Coverage: ${(cov * 100).toFixed(2)}%`);
+        console.log(`Effective accuracy: ${(acc * 100).toFixed(2)}%`);
 
         return result;
     }
