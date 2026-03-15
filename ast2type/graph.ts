@@ -248,6 +248,10 @@ export class TypeGraph {
         for (const [nodeId, state] of this.nodes) {
             const id = nodeId;
             const ty = tNode.get(state.val);
+            if (state.toAnno() === "unknown") {
+                console.error(`Node ${id} has unknown type, skipping annotation output`);
+                continue;
+            }
             if (!meta.v8Kind.has(id)) continue;
             outJson.push({
                 context: meta.context.get(id) || "",

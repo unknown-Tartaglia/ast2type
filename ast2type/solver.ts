@@ -74,6 +74,20 @@ export class Solver {
         const annoOut = path.join(outputDir, "typeinfo.json");
         writeJsonStream(annoOut, anno);
 
+        // 按 file 分组
+        const groups : Record<string, any> = {};
+        for (const item of anno) {
+            if (!groups[item.relapath]) groups[item.relapath] = [];
+            const { file, relapath, ...rest } = item;  // 去掉 file 字段
+            groups[item.relapath].push(rest);
+        }
+
+        for (const file in groups) {
+            const outfile = path.join(path.join(outputDir, "typeinfo"), file + ".json");
+            fs.mkdirSync(path.dirname(outfile), { recursive: true }); // 创建目录
+            writeJsonStream(outfile, groups[file]);
+        }
+
         // 评估标注
         const evalResult = this.graph.evaluate();
         const evalOut = path.join(outputDir, "evaluation.json");
