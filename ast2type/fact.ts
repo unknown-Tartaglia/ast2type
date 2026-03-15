@@ -140,7 +140,6 @@ export interface AllocLiteralFact {
   kind: "AllocLiteral";
   varId: VarId;
   value: string | number | boolean | null | bigint | RegExp;
-  typeId: TypeId;
 }
 
 export interface AllocArrayFact {
@@ -290,8 +289,8 @@ export class Emitter {
     this.store.add({ kind: "AllocPrimitive", varId, typeId });
   }
 
-  allocLiteral(varId: VarId, value: string | number | boolean | null | bigint | RegExp, typeId: TypeId) {
-    this.store.add({ kind: "AllocLiteral", varId, value, typeId });
+  allocLiteral(varId: VarId, value: string | number | boolean | null | bigint | RegExp) {
+    this.store.add({ kind: "AllocLiteral", varId, value });
   }
 
   allocArray(varId: VarId) {  

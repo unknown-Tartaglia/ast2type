@@ -34,34 +34,6 @@ const IGNORE_LOGS = false; // 忽略日志
 
 export const DEDUCE_ONLY_WHEN_ALL_KNOWNN = false; // 仅在所有分支类型已知时进行类型推断
 
-// 常量类型
-const NUMBER = 1;
-const STRING = 2;
-const BOOLEAN = 3;
-const ANY = 4;
-const UNKNOWN = 5;
-const VOID = 6;
-const NULL = 7;
-const UNDEFINED = 8;
-const NEVER = 9;
-const REGEXP = 10;
-const BIGINT = 11;
-
-interface Param {
-  name: string;
-  type: number;
-}
-
-// Type 类型结构体
-type TypeNode =
-  | { kind: "primitive"; name: string }
-  | { kind: "literal"; value: string | number | boolean }
-  | { kind: "array"; elementType: number }
-  | { kind: "function"; name: string; id: number; params: Param[]; returnType: number }
-  | { kind: "union"; types: number[] }
-  | { kind: "object"; name: string; id: number; properties: Record<string, number> }
-  | { kind: "enum"; name: string; members: Record<string, number> };
-
 // AST 节点类型
 interface AstNode {
   kind: string;
@@ -288,7 +260,6 @@ function secondPass(filePath: string, node: AstNode) {
     // 处理匿名对象
     ObjectLiteralExpression(node) {
       meta.v8Kind.set(node.varId!, "ObjectLiteral");  
-      // syntaxNodes[node.varId!].v8kind = "ObjectLiteral"
       emit.allocObj(node.varId!);
     },
     // 处理函数声明
@@ -316,18 +287,11 @@ function secondPass(filePath: string, node: AstNode) {
         else if (findNodesByKind(node, "ReturnStatement").length === 0) {
           // 如果没有返回类型注解并且没有Return语句
           emit.returnVoid(node.varId!);
-          // const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: VOID });
-          // setTypeVar(idNode?.varId!, id);
         }
-        // else {
-        //   const id = newTypeNode({ kind: "function", name: idNode?.text!, id: idNode?.varId!, params: [], returnType: UNKNOWN });
-        //   setTypeVar(idNode?.varId!, id);
-        // }
       }
     },
     FunctionExpression(node) {
       meta.v8Kind.set(node.varId!, "FunctionLiteral");
-      // syntaxNodes[node.varId!].v8kind = "FunctionLiteral";
       emit.allocFunction(node.varId!, node.varId!);
       if (node.children) {
         const idNode = node;
@@ -342,13 +306,7 @@ function secondPass(filePath: string, node: AstNode) {
         else if (findNodesByKind(node, "ReturnStatement").length === 0) {
           // 如果没有返回类型注解并且没有Return语句
           emit.returnVoid(idNode!.varId!);
-          // const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: idNode?.varId!, params: [], returnType: VOID });
-          // setTypeVar(idNode?.varId!, id);
         }
-        // else {
-        //   const id = newTypeNode({ kind: "function", name: `anonymous${node.varId}`, id: idNode?.varId!, params: [], returnType: UNKNOWN });
-        //   setTypeVar(idNode?.varId!, id);
-        // }
       }
     },
     // 变量声明
@@ -449,8 +407,6 @@ function secondPass(filePath: string, node: AstNode) {
         if (idNode && idNode.varId !== undefined) {
           meta.enumName.set(idNode.varId!, idNode.text!);
           emit.allocEnum(idNode.varId!);
-          // const typeId = newTypeNode({ kind: "enum", name: idNode.text!, members: {} });
-          // setTypeVar(idNode.varId!, typeId);
           varBindings.set(idNode.text!, idNode.varId!);
         }
 
@@ -473,15 +429,6 @@ function secondPass(filePath: string, node: AstNode) {
 
       emit.enumMember(paNode.varId!, idNode.varId!);
       emit.flow(nb.varId!, idNode.varId!, `enum member ${idNode.text} = ${nb.text}`);
-      // const oldTypeId = typeSet.get(paNode.varId!);
-      // if (!oldTypeId) return;
-      // const oldTypeNode = typeNodes.get(oldTypeId);
-      // if (!oldTypeNode || oldTypeNode.kind !== "enum") return;
-      // const newMembers = { ...oldTypeNode.members };
-      // newMembers[idNode.text!] = newTypeNode({ kind: "primitive", name: nb.text});
-
-      // const typeId = newTypeNode({ kind: "enum", name: idNode.text!, members: newMembers });
-      // setTypeVar(paNode.varId!, typeId);
     },
     // 处理接口声明
     InterfaceDeclaration(node) {
@@ -489,8 +436,6 @@ function secondPass(filePath: string, node: AstNode) {
         const idNode = node.children?.filter(n => n.kind === "Identifier")[0];
         if (idNode && idNode.varId !== undefined) {
           emit.allocInterface(idNode.varId!);
-          // const typeId = newTypeNode({ kind: "object", name: idNode.text!, id: idNode.varId!, properties: Object.create(null) });
-          // setTypeVar(idNode.varId!, typeId);
           varBindings.set(idNode.text!, idNode.varId!);
         }
 
@@ -544,7 +489,6 @@ function secondPass(filePath: string, node: AstNode) {
 
         varBindings.set(methodIdNode.text, methodIdNode.varId!);
 
-        // let funcType: TypeNode = { kind: "function", name: methodIdNode?.text!, id: methodIdNode?.varId!, params: [], returnType: UNKNOWN };
         const index = node.children?.findIndex(n => n.kind === "ColonToken");
         // 类型注解
         if (index !== undefined && index !== -1) {
@@ -634,7 +578,6 @@ function secondPass(filePath: string, node: AstNode) {
         const propIdNode = node.children?.find(n => n.kind === "Identifier");
         if (propIdNode && propIdNode.varId !== undefined) {
 
-          // let funcType: TypeNode = { kind: "function", name: propIdNode?.text!, id: propIdNode?.varId!, params: [], returnType: UNKNOWN };
           const index = node.children?.findIndex(n => n.kind === "ColonToken");
           // 类型注解
           if (index !== undefined && index !== -1) {
@@ -829,39 +772,39 @@ function secondPass(filePath: string, node: AstNode) {
 
   const handlers: Record<string, (node: AstNode) => void> = {
     StringLiteral(node) {
-      emit.allocLiteral(node.varId!, node.text ?? "unknown text", STRING);
+      emit.allocLiteral(node.varId!, node.text ?? "unknown text");
       meta.v8Kind.set(node.varId!, "Literal");
     },
     NoSubstitutionTemplateLiteral(node) {
-      emit.allocLiteral(node.varId!, node.text ?? "unknown text", STRING);
+      emit.allocLiteral(node.varId!, node.text ?? "unknown text");
     },
     FirstLiteralToken(node) {
       // 暂时默认为数字
-      emit.allocLiteral(node.varId!, Number(node.text), NUMBER);
+      emit.allocLiteral(node.varId!, Number(node.text));
       meta.v8Kind.set(node.varId!, "Literal");
     },
     NumericLiteral(node) {
-      emit.allocLiteral(node.varId!, Number(node.text), NUMBER)
+      emit.allocLiteral(node.varId!, Number(node.text))
       meta.v8Kind.set(node.varId!, "Literal");
     },
     TrueKeyword(node) {
-      emit.allocLiteral(node.varId!, true, BOOLEAN);
+      emit.allocLiteral(node.varId!, true);
       meta.v8Kind.set(node.varId!, "Literal");
     },
     FalseKeyword(node) {
-      emit.allocLiteral(node.varId!, false, BOOLEAN);
+      emit.allocLiteral(node.varId!, false);
       meta.v8Kind.set(node.varId!, "Literal");
     },
     NullKeyword(node) {
-      emit.allocLiteral(node.varId!, null, NULL);
+      emit.allocLiteral(node.varId!, null);
       meta.v8Kind.set(node.varId!, "Literal");
     },
     BigIntLiteral(node) {
-      emit.allocLiteral(node.varId!, BigInt(node.text ?? "0"), BIGINT);
+      emit.allocLiteral(node.varId!, BigInt(node.text ?? "0"));
       meta.v8Kind.set(node.varId!, "Literal");
     },
     RegularExpressionLiteral(node) {
-      emit.allocLiteral(node.varId!, new RegExp(node.text?.slice(1, node.text.lastIndexOf("/")) || ""), REGEXP);
+      emit.allocLiteral(node.varId!, new RegExp(node.text?.slice(1, node.text.lastIndexOf("/")) || ""));
       meta.v8Kind.set(node.varId!, "RegExpLiteral");
     },
     ArrayLiteralExpression(node) {
@@ -872,11 +815,11 @@ function secondPass(filePath: string, node: AstNode) {
       }
     },
     TemplateExpression(node) {
-      emit.allocLiteral(node.varId!, node.text ?? "", STRING);
+      emit.allocLiteral(node.varId!, node.text ?? "");
       meta.v8Kind.set(node.varId!, "TemplateLiteral");
     },
     FirstTemplateToken(node) {
-      emit.allocLiteral(node.varId!, node.text ?? "", STRING);
+      emit.allocLiteral(node.varId!, node.text ?? "");
       meta.v8Kind.set(node.varId!, "TemplateLiteral");
     },
     // 处理类型关键字
@@ -1140,7 +1083,7 @@ function secondPass(filePath: string, node: AstNode) {
       if (tsMorphNodes.includes(node.parent?.kind!)) meta.v8Kind.set(node.varId!, "VariableProxy"); // syntaxNodes[node.varId!].v8kind = "VariableProxy";
       if (node.text) {
         if (node.text === "undefined") {
-          emit.allocPrimitive(node.varId!, UNDEFINED);
+          emit.allocPrimitive(node.varId!, tNode.UNDEFINED);
           return;
         }
         const typeId = paramBindings.get(node.text) ?? varBindings.get(node.text);
@@ -1148,7 +1091,7 @@ function secondPass(filePath: string, node: AstNode) {
         if (typeId !== undefined) {
           if (node.parent?.kind === "PropertyAssignment" && node.parent?.children?.[2] === node) {
             // 属性赋值时不添加sameID约束
-            emit.flow(typeId, node.varId!, `property assignment for ${node.text!}`);
+            // emit.flow(typeId, node.varId!, `property assignment for ${node.text!}`);
           } else {
             emit.sameID(node.varId!, typeId);
             if (typeId === node.varId) {
