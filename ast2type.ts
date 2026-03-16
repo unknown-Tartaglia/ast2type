@@ -535,8 +535,11 @@ function secondPass(filePath: string, node: AstNode) {
         const propIdNode = findNodesByKind(node, "Identifier")[0];
         if (!propIdNode || propIdNode.varId === undefined) return;
 
-        if (propIdNode.text) meta.propName.set(propIdNode.varId!, propIdNode.text);
-        console.log(`PropertyDeclaration: ${idNode.text!}.${propIdNode.text!}`);
+        if (propIdNode.text) {
+          meta.propName.set(propIdNode.varId!, propIdNode.text);
+          varBindings.set(propIdNode.text, propIdNode.varId!);
+          console.log(`PropertyDeclaration: ${idNode.text!}.${propIdNode.text!}(${propIdNode.varId})`);        console.log(`PropertyDeclaration: ${idNode.text!}.${propIdNode.text!}(${propIdNode.varId})`);
+        }
         emit.prop(idNode.varId, propIdNode.varId);
         
 
@@ -1087,11 +1090,12 @@ function secondPass(filePath: string, node: AstNode) {
           return;
         }
         const typeId = paramBindings.get(node.text) ?? varBindings.get(node.text);
+        if (node.text === "x") console.log(`Identifier x at line ${node.position?.start?.line}, column ${node.position?.start?.character} in ${filePath} has varId ${node.varId} and typeId ${typeId}`);
 
         if (typeId !== undefined) {
-          if (node.parent?.kind === "PropertyAssignment" && node.parent?.children?.[2] === node) {
+          if ((node.parent?.kind === "PropertyAssignment") && node.parent?.children?.[2] === node) {
             // 属性赋值时不添加sameID约束
-            // emit.flow(typeId, node.varId!, `property assignment for ${node.text!}`);
+            emit.flow(typeId, node.varId!, `property assignment for ${node.text!}`);
           } else {
             emit.sameID(node.varId!, typeId);
             if (typeId === node.varId) {
