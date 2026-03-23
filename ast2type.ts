@@ -103,6 +103,7 @@ function findNodesByKind(root: AstNode, kind: string): AstNode[] {
   const found: AstNode[] = [];
 
   function walk(n: AstNode) {
+    if (!n) return;
     if (n.kind === kind) {
       found.push(n);
     }
@@ -138,6 +139,7 @@ function firstPass(filePath: string, ast: AstNode) {
     node.varId = getTypeVarId(node);
     // 提前函数声明
     for (const child of node.children || []) {
+      if (!child) continue;
       child.parent = node;
       walk(child);
     }
@@ -1274,6 +1276,7 @@ function secondPass(filePath: string, node: AstNode) {
 
 
   function walk(node: AstNode) {
+    if (!node) return;
     const id = node.varId;
     if (id === undefined) throw new Error("Missing varId in second pass");
     meta.file.set(id, filePath);
