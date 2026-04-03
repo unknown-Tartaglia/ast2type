@@ -1,0 +1,69 @@
+[
+  {
+    "input": [{ "username": "john", "age": 25, "email": "john@example.com" }],
+    "output": { "valid": true, "errors": [] }
+  },
+  {
+    "input": [{ "username": "al" }],
+    "output": {
+      "valid": false,
+      "errors": ["Username must be at least 3 characters long"]
+    }
+  },
+  {
+    "input": [{ "username": "alice", "age": -5 }],
+    "output": {
+      "valid": false,
+      "errors": ["Age must be between 0 and 150"]
+    }
+  },
+  {
+    "input": [{ "username": "bob", "age": 200 }],
+    "output": {
+      "valid": false,
+      "errors": ["Age must be between 0 and 150"]
+    }
+  },
+  {
+    "input": [{ "username": "charlie", "email": "invalid-email" }],
+    "output": {
+      "valid": false,
+      "errors": ["Email must contain @ symbol"]
+    }
+  },
+  {
+    "input": [{ "username": "david", "age": "thirty" }],
+    "output": {
+      "valid": false,
+      "errors": ["Age must be a number if provided"]
+    }
+  },
+  {
+    "input": [null],
+    "output": {
+      "valid": false,
+      "errors": ["User must be an object"]
+    }
+  },
+  {
+    "input": [{}],
+    "output": {
+      "valid": false,
+      "errors": ["Username is required and must be a string"]
+    }
+  },
+  {
+    "input": [{ "username": "ev" }],
+    "output": {
+      "valid": false,
+      "errors": ["Username must be at least 3 characters long"]
+    }
+  },
+  {
+    "input": [{ "username": "frank", "email": 123 }],
+    "output": {
+      "valid": false,
+      "errors": ["Email must be a string if provided"]
+    }
+  }
+]

@@ -1,0 +1,242 @@
+import { Platform, StyleSheet } from 'react-native';
+import { SuitStyle, PublicFont } from '@hw-vmall/vrn-basic-comp';
+export interface PerosonHead {
+  [propName: string]: any;
+}
+export default (theme, isPad, titleOpacity, newMergeStyle, isMember) => {
+  if (newMergeStyle) {
+    theme = SuitStyle;
+  }
+  const userNameTextColor = theme.C11;
+  const headerHeight = 56;
+  return StyleSheet.create<PerosonHead>({
+    View: {
+      width: '100%',
+      position: 'fixed',
+      top: 0,
+      left: 0,
+      display: 'flex',
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: isPad ? 24 : 16,
+      zIndex: 999,
+      elevation: 999,
+    },
+    ViewNormal: {
+      width: '100%',
+      height: 42,
+      display: 'flex',
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'flex-end',
+      zIndex: 999,
+      elevation: 999,
+      paddingTop: 16,
+    },
+
+    cricle: {
+      marginRight: 7,
+      position: 'relative',
+      alignContent: 'center',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    view: {
+      height: 56,
+      flexDirection: 'row',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      position: 'relative',
+    },
+    avartWrap: {
+      height: 32,
+      flex: 1,
+      display: 'flex',
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'flex-start',
+    },
+    userName: {
+      ...theme.T10,
+      ...userNameTextColor,
+      marginRight: 3,
+    },
+    userAva: { width: 32, height: 32, borderRadius: 16, marginRight: 8 },
+    iconList: {
+      alignItems: 'center',
+      justifyContent: 'flex-start',
+      display: 'flex',
+      flexDirection: 'row',
+    },
+    image: {
+      width: 40,
+      height: 40,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    imageLast: {
+      marginRight: 0,
+    },
+    rightWrap: {
+      height: '100%',
+      maxWidth: 120,
+      justifyContent: 'flex-end',
+    },
+    text: {
+      ...theme.T13,
+      ...theme.C11,
+    },
+    rightText: {
+      ...theme.T7,
+    },
+    topIcon: {
+      width: 16,
+      height: 16,
+      position: 'absolute',
+      color: 'white',
+      top: -4,
+      right: -4,
+      backgroundColor: theme.C35.color,
+      borderRadius: 8,
+    },
+    topIconMore: {
+      width: 24,
+    },
+    hidden: {
+      position: 'relative',
+      display: 'none',
+    },
+    bgImageView: {
+      overflow: 'hidden',
+      // position: 'absolute',
+      width: '100%',
+    },
+    showText: {
+      fontSize: 8,
+      fontWeight: '400',
+      fontFamily: PublicFont.fontFamilyMedium,
+      maxWidth: 16,
+      height: 10,
+      transform: [{ scale: 8 / 12 }],
+      justifyContent: 'center',
+      alignItems: 'center',
+      lineHeight: 12,
+    },
+    showAvatar: {
+      height: 9,
+      backgroundColor: '#FFDDA9',
+      borderRadius: 6,
+      bottom: -32,
+      zIndex: 100,
+      justifyContent: 'center',
+      alignItems: 'center',
+      flexDirection: 'row',
+      paddingLeft: 1,
+      paddingRight: 1,
+    },
+    showIcon: {
+      width: 7,
+      height: 7,
+      zIndex: 1,
+    },
+    showRadius: {
+      position: 'absolute',
+      bottom: 3,
+      width: 33,
+      height: 34,
+      zIndex: 99,
+    },
+    avaImg: {
+      width: 33,
+      height: 33,
+      borderRadius: 24,
+      zIndex: 1,
+      top: -2,
+    },
+    topText: {
+      ...theme.T1,
+      ...theme.C17,
+      textAlign: 'center',
+      lineHeight: 16,
+    },
+    animationView: {
+      height: 56,
+      top: 0,
+      right: 0,
+      zIndex: 1,
+      position: 'absolute',
+      display: 'flex',
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      backgroundColor: theme.C32.color,
+      paddingHorizontal: 16,
+    },
+    myTitle: {
+      fontSize: 26,
+      color: 'rgba(0,0,0,0.90)',
+      fontWeight: '700',
+    },
+    userNameBox: {
+      position: 'absolute',
+      left: 20,
+    },
+    animationUserName: {
+      ...theme.T10,
+      ...userNameTextColor,
+      marginRight: 3,
+      fontSize: 16,
+      color: 'rgba(0,0,0,0.90)',
+      fontWeight: '500',
+    },
+    unLoginHeader: {
+      position: 'relative',
+      display: 'flex',
+      flexDirection: 'row',
+      alignItems: 'center',
+      width: '100%',
+      flex: 1,
+      height: headerHeight,
+    },
+    memberLoginHeader: { justifyContent: 'center', height: 56 },
+    headerImg: { position: 'absolute', top: (headerHeight - 32) / 2 },
+    headerMemberImg: { position: 'absolute', top: (headerHeight - 41) / 2 - 1.5 },
+    loginHeader: {
+      position: 'relative',
+      display: 'flex',
+      flexDirection: 'row',
+      alignItems: 'center',
+      width: '100%',
+      flex: 1,
+      height: headerHeight,
+    },
+    tagText: {
+      display: 'flex',
+      flexDirection: 'row',
+      alignItems: 'center',
+    },
+    txtBg: {
+      height: 13,
+      backgroundColor: 'rgba(249,188,100,0.2)',
+      paddingRight: 3,
+      paddingLeft: 7,
+      borderTopRightRadius: 7.5,
+      borderBottomRightRadius: 7.5,
+      marginLeft: -6,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingTop: 1,
+    },
+    medal: {
+      width: 14,
+      height: 17,
+    },
+    tagTxt: {
+      fontSize: 9,
+      lineHeight: 13,
+      color: '#825B44',
+      letterSpacing: 0.3,
+    },
+  });
+};

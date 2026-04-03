@@ -1,0 +1,50 @@
+[
+  {
+    "input": ["Hello, {name}!", { "name": "World" }],
+    "output": "Hello, World!"
+  },
+  {
+    "input": ["{greeting} {target}", { "greeting": "Hi", "target": "there" }],
+    "output": "Hi there"
+  },
+  {
+    "input": ["No placeholders here", { "name": "ignored" }],
+    "output": "No placeholders here"
+  },
+  {
+    "input": ["Missing {value1} and {value2}", { "value1": "first" }],
+    "output": "Missing first and {value2}"
+  },
+  {
+    "input": ["{a}{b}{c}", { "a": 1, "b": 2, "c": 3 }],
+    "output": "123"
+  },
+  {
+    "input": [null, { "name": "test" }],
+    "output": ""
+  },
+  {
+    "input": ["Test", null],
+    "output": "Test"
+  },
+  {
+    "input": ["Test", {}],
+    "output": "Test"
+  },
+  {
+    "input": ["{empty}", { "empty": "" }],
+    "output": ""
+  },
+  {
+    "input": ["Nested {not{valid}}", { "not{valid": "won't match" }],
+    "output": "Nested {not{valid}}"
+  },
+  {
+    "input": ["{a} {b} {a}", { "a": "same", "b": "different" }],
+    "output": "same different same"
+  },
+  {
+    "input": ["{boolean} {number}", { "boolean": true, "number": 42 }],
+    "output": "true 42"
+  }
+]

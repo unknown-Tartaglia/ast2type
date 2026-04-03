@@ -1,0 +1,42 @@
+[
+  {
+    "input": [[1, 2, 3, 4, 5]],
+    "output": { "average": 3, "min": 1, "max": 5, "sum": 15 }
+  },
+  {
+    "input": [[10, 20, 30]],
+    "output": { "average": 20, "min": 10, "max": 30, "sum": 60 }
+  },
+  {
+    "input": [[-5, 0, 5, 10]],
+    "output": { "average": 2.5, "min": -5, "max": 10, "sum": 10 }
+  },
+  {
+    "input": [[]],
+    "output": { "average": 0, "min": 0, "max": 0, "sum": 0 }
+  },
+  {
+    "input": [[1, 2, null, 3, 4, "5"]],
+    "output": { "average": 2.5, "min": 1, "max": 4, "sum": 10 }
+  },
+  {
+    "input": [["not a number", "another string"]],
+    "output": { "average": 0, "min": 0, "max": 0, "sum": 0 }
+  },
+  {
+    "input": [null],
+    "output": { "average": 0, "min": 0, "max": 0, "sum": 0 }
+  },
+  {
+    "input": [[3.14, 2.71, 1.41]],
+    "output": { "average": 2.42, "min": 1.41, "max": 3.14, "sum": 7.26 }
+  },
+  {
+    "input": [[100]],
+    "output": { "average": 100, "min": 100, "max": 100, "sum": 100 }
+  },
+  {
+    "input": [[0, 0, 0, 0]],
+    "output": { "average": 0, "min": 0, "max": 0, "sum": 0 }
+  }
+]

@@ -1,0 +1,58 @@
+[
+  {
+    "input": [
+      [
+        { "id": 1, "name": "Product A", "price": 100, "discount": 10, "inStock": true },
+        { "id": 2, "name": "Product B", "price": 200, "discount": null, "inStock": false },
+        { "id": 3, "name": "Product C", "price": 150, "discount": 20, "inStock": true },
+        { "id": 4, "name": "Product D", "price": 80, "discount": 0, "inStock": true }
+      ]
+    ],
+    "output": [
+      { "id": 4, "name": "Product D", "finalPrice": 80, "inStock": true },
+      { "id": 1, "name": "Product A", "finalPrice": 90, "inStock": true },
+      { "id": 3, "name": "Product C", "finalPrice": 120, "inStock": true }
+    ]
+  },
+  {
+    "input": [
+      [
+        { "id": 1, "name": "Item X", "price": 1000, "discount": 50, "inStock": true },
+        { "id": 2, "name": "Item Y", "price": 500, "discount": 30, "inStock": true }
+      ]
+    ],
+    "output": [
+      { "id": 2, "name": "Item Y", "finalPrice": 350, "inStock": true },
+      { "id": 1, "name": "Item X", "finalPrice": 500, "inStock": true }
+    ]
+  },
+  {
+    "input": [
+      [
+        { "id": 1, "name": "No Discount 1", "price": 300, "inStock": true },
+        { "id": 2, "name": "No Discount 2", "price": 150, "inStock": true }
+      ]
+    ],
+    "output": [
+      { "id": 2, "name": "No Discount 2", "finalPrice": 150, "inStock": true },
+      { "id": 1, "name": "No Discount 1", "finalPrice": 300, "inStock": true }
+    ]
+  },
+  {
+    "input": [[]],
+    "output": []
+  },
+  {
+    "input": [
+      [
+        { "id": 1, "name": "Out of Stock", "price": 100, "discount": 10, "inStock": false },
+        { "id": 2, "name": "Also Out", "price": 50, "inStock": false }
+      ]
+    ],
+    "output": []
+  },
+  {
+    "input": [null],
+    "output": []
+  }
+]

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <title>华为商城VMALL</title>
+    <meta
+      name="description"
+      content="华为商城是华为公司旗下官方电商平台，提供华为手机、PC、平板、穿戴、音频、智慧屏、IoT等智能终端产品，持续打造便捷、暖心的购物体验，力争将全场景智慧生活带给每一位消费者。"
+    />
+    <meta
+      name="keywords"
+      content="华为、华为官网、华为5G、华为手机、华为笔记本、华为平板、华为穿戴、华为智慧屏、华为配件、华为智能家居"
+    />
+    <meta name="mobile-agent" content="format=xhtml;url=https://m.vmall.com/" />
+    <meta http-equiv="Cache-Control" content="no-cache,no-store"/>
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <link rel="shortcut icon" href="https://www.vmall.com/favicon.ico" />
+    <link
+            rel="stylesheet"
+            type="text/css"
+            href="<%= process.env.BUNDLE_CDN_URL %>/css/portal/footer-toolbar.min.css"
+    />
+  </head>
+  <body>
+    <style>
+      @media screen and (min-width: 841px) {
+        body div {
+          font-family: 'Helvetica Neue', Helvetica, Arial, 'Microsoft Yahei',
+            'Hiragino Sans GB', 'Heiti SC', 'WenQuanYi Micro Hei', sans-serif !important;
+        }
+      }
+      @media screen and (max-width: 840px) {
+        body div {
+          font-family: Arial, Helvetica, sans-serif, 'Lucida Grande', Verdana !important;
+        }
+      }
+      /* 搜索input适配IE */
+      #textInput input[type='text']::-ms-clear {
+        display: none;
+      }
+      #personal_no_focus_outline :focus:not(.focus-visible) {
+        outline: none;
+      }
+    </style>
+    <div id="react-root"></div>
+    <script src="<%= process.env.BUNDLE_CDN_URL %>/script/<%= process.env.ENV_CONFIG %>/script.js"></script>
+    <script src="<%= process.env.BUNDLE_CDN_URL %>/script/common/script.js"></script>
+  </body>
+  <script>
+    setScale();
+    handleIosZIndexFromImg();
+  </script>
+</html>

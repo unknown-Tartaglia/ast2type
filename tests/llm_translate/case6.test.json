@@ -1,0 +1,89 @@
+[
+  {
+    "input": [
+      [
+        { "id": 1, "name": "Apple", "price": 1.0, "category": "fruit" },
+        { "id": 2, "name": "Banana", "price": 0.5, "category": "fruit" },
+        { "id": 3, "name": "Carrot", "price": 0.3, "category": "vegetable" },
+        { "id": 4, "name": "Broccoli", "price": 1.2, "category": "vegetable" }
+      ]
+    ],
+    "output": {
+      "fruit": [
+        { "id": 1, "name": "Apple", "price": 1.0 },
+        { "id": 2, "name": "Banana", "price": 0.5 }
+      ],
+      "vegetable": [
+        { "id": 3, "name": "Carrot", "price": 0.3 },
+        { "id": 4, "name": "Broccoli", "price": 1.2 }
+      ]
+    }
+  },
+  {
+    "input": [
+      [
+        { "id": 1, "name": "Item1", "category": "cat1" },
+        { "id": 2, "name": "Item2", "category": "cat1" },
+        { "id": 3, "name": "Item3", "category": "cat2" }
+      ]
+    ],
+    "output": {
+      "cat1": [
+        { "id": 1, "name": "Item1" },
+        { "id": 2, "name": "Item2" }
+      ],
+      "cat2": [
+        { "id": 3, "name": "Item3" }
+      ]
+    }
+  },
+  {
+    "input": [[]],
+    "output": {}
+  },
+  {
+    "input": [
+      [
+        { "id": 1, "name": "NoCategory" },
+        { "id": 2, "name": "Another", "category": null }
+      ]
+    ],
+    "output": {}
+  },
+  {
+    "input": [null],
+    "output": {}
+  },
+  {
+    "input": [
+      [
+        { "id": 1, "name": "Single", "category": "alone", "price": 100 },
+        { "id": 2, "name": "Single2", "category": "alone", "price": 200 }
+      ]
+    ],
+    "output": {
+      "alone": [
+        { "id": 1, "name": "Single", "price": 100 },
+        { "id": 2, "name": "Single2", "price": 200 }
+      ]
+    }
+  },
+  {
+    "input": [
+      [
+        { "category": "test", "id": 1, "name": "Test1" },
+        { "category": "test", "id": 2, "name": "Test2" },
+        { "category": "other", "id": 3, "name": "Other1" }
+      ]
+    ],
+    "output": {
+      "test": [
+        { "id": 1, "name": "Test1" },
+        { "id": 2, "name": "Test2" }
+      ],
+      "other": [
+        { "id": 3, "name": "Other1" }
+      ]
+    }
+  }
+]

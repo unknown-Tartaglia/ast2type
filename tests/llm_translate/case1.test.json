@@ -1,0 +1,30 @@
+[
+  {
+    "input": ["Hello world this is a test"],
+    "output": {"wordCount":6,"charCount":26,"longestWord":"Hello","averageLength":3.5}
+  },
+  {
+    "input": ["The quick brown fox jumps over the lazy dog"],
+    "output": {"wordCount":9,"charCount":43,"longestWord":"quick","averageLength":3.89}
+  },
+  {
+    "input": [""],
+    "output": {"wordCount":0,"charCount":0,"longestWord":"","averageLength":0}
+  },
+  {
+    "input": ["   Multiple   spaces   between   words   "],
+    "output": {"wordCount":4,"charCount":41,"longestWord":"Multiple","averageLength":6.5}
+  },
+  {
+    "input": ["Single"],
+    "output": {"wordCount":1,"charCount":6,"longestWord":"Single","averageLength":6}
+  },
+  {
+    "input": [null],
+    "output": {"wordCount":0,"charCount":0,"longestWord":"","averageLength":0}
+  },
+  {
+    "input": ["Short words a an the"],
+    "output": {"wordCount":5,"charCount":20,"longestWord":"Short","averageLength":3.2}
+  }
+]

@@ -1,7 +1,7 @@
 {
   "name": "ts_play",
   "version": "1.0.0",
-  "description": "",
+  "description": "基于约束的JavaScript/TypeScript类型推导工具，能够从源代码中提取类型信息并生成结构化类型定义",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -18,6 +18,7 @@
     "@types/node": "^22.15.18",
     "@types/react": "^19.2.2",
     "@types/react-native": "^0.72.8",
+    "@types/stream-json": "^1.7.8",
     "eslint": "^9.38.0",
     "globals": "^16.4.0",
     "prettier": "^3.5.3",
@@ -33,6 +34,7 @@
     "glob": "^11.0.2",
     "json5": "^2.2.3",
     "multer": "^2.0.2",
+    "stream-json": "^1.9.1",
     "ts-morph": "^25.0.1",
     "xlsx": "^0.18.5"
   }
