@@ -1,8 +1,8 @@
-import { ConditionalExpression, ConstructorTypeNode } from "ts-morph";
-import { meta, solver, tNode } from "../ast2type";
+import { meta, outputDir, solver, tNode } from "../ast2type";
 import { VarId } from "./fact"
 import { NodeState, tNodeStore, DeterminantNodeState } from "./nType";
 import * as path from "path";
+import * as fs from "fs";
 
 export class TypeGraph {
     nodes = new Map<VarId, NodeState>()
@@ -208,12 +208,14 @@ export class TypeGraph {
         const edges: any[] = [];
         const unknownNodes: Set<VarId> = new Set<VarId>();
         for (const [nodeId, state] of this.nodes) {
+            let file = meta.file.get(nodeId);
+            file = file ? path.join(file.split("ast" + require("path").sep)[0].replace("_output", ""), file.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")) : "unknown_file";
             nodes.push({
                 id: nodeId,
                 label: meta.text.get(nodeId) || `var_${nodeId}`,
                 type: state.toString(),
                 text: meta.text.get(nodeId) || "",
-                file: meta.file.get(nodeId) || null,
+                file: file,
                 position: meta.pos.get(nodeId) || null,
                 fullType: JSON.stringify(state.toJson(), null, 2) || null,
               });
@@ -230,12 +232,14 @@ export class TypeGraph {
             }
         }
         for (const unk of unknownNodes) {   
+            let file = meta.file.get(unk);
+            file = file ? path.join(file.split("ast" + require("path").sep)[0].replace("_output", ""), file.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")) : "unknown_file";
             nodes.push({
                 id: unk,
                 label: meta.text.get(unk) || `var_${unk}`,
                 type: "unknown",
                 text: meta.text.get(unk) || "",
-                file: meta.file.get(unk) || null,
+                file: file,
                 position: meta.pos.get(unk) || null,
                 fullType: null,
             });
@@ -245,14 +249,28 @@ export class TypeGraph {
 
     toAnno() {
         const outJson = [];
+        const unkJson = [];
         for (const [nodeId, state] of this.nodes) {
             const id = nodeId;
             const ty = tNode.get(state.val);
+            if (!meta.v8Kind.has(id)) continue;
             if (state.toAnno() === "unknown") {
                 console.error(`Node ${id} has unknown type, skipping annotation output`);
+                unkJson.push({
+                    id: id,
+                    context: meta.context.get(id) || "",
+                    exprText: meta.text.get(id) || "",
+                    exprKind: meta.v8Kind.get(id) || "",
+                    morphKind: meta.kind.get(id) || "",
+                    location: meta.offset.get(id) || -1,
+                    pos: meta.pos.get(id) || null,
+                    type: "unknown",
+                    constant: ty?.kind === "literal" ? ty.value : undefined,
+                    relapath: meta.file.get(id)!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, ""),
+                    file: path.join(meta.file.get(id)!.split("ast" + require("path").sep)[0].replace("_output", ""), meta.file.get(id)!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")),
+                });
                 continue;
             }
-            if (!meta.v8Kind.has(id)) continue;
             outJson.push({
                 context: meta.context.get(id) || "",
                 exprText: meta.text.get(id) || "",
@@ -266,7 +284,30 @@ export class TypeGraph {
                 file: path.join(meta.file.get(id)!.split("ast" + require("path").sep)[0].replace("_output", ""), meta.file.get(id)!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")),
             })
         }
-        return outJson;
+        for (const edge of this.toEdges.values()) {
+            for (const e of edge) {
+                if (e.type === "annotation" || e.type === "returnAnnotation") {
+                    if (!this.nodes.has(e.from)) {
+                        const id = e.from;
+                        let file = meta.file.get(id);
+                        file = file ? path.join(file.split("ast" + require("path").sep)[0].replace("_output", ""), file.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")) : "unknown_file";
+                        unkJson.push({
+                            id: id,
+                            context: meta.context.get(id) || "",
+                            exprText: meta.text.get(id) || "",
+                            exprKind: meta.v8Kind.get(id) || "",
+                            morphKind: meta.kind.get(id) || "",
+                            location: meta.offset.get(id) || -1,
+                            pos: meta.pos.get(id) || null,
+                            type: "unknown",
+                            relapath: meta.file.get(id)!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, ""),
+                            file: path.join(meta.file.get(id)!.split("ast" + require("path").sep)[0].replace("_output", ""), meta.file.get(id)!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")),
+                        });
+                    }
+                }
+            }
+        }
+        return [outJson, unkJson];
     }
 
     evaluate() {
@@ -283,6 +324,27 @@ export class TypeGraph {
             rightEdges: [] as { kind: string, from: VarId, to: VarId, inferredType: string, expectedType: string }[],
             wrongEdges: [] as { kind: string, from: VarId, to: VarId, inferredType: string, expectedType: string }[],
         };
+
+        // 从output/inferinfo.json加载外部推导类型信息
+        const inferredTypes: Map<VarId, string> = new Map<VarId, string>();
+        try {
+            const inferInfoPath = path.join(outputDir, "inferinfo.json");
+            if (fs.existsSync(inferInfoPath)) {
+                const inferData = JSON.parse(fs.readFileSync(inferInfoPath, "utf-8"));
+                for (const item of inferData) {
+                    if (item.id === undefined || item.type === undefined) {
+                        console.warn(`Invalid infer info item: ${JSON.stringify(item)}, skipping`);
+                        continue;
+                    }
+                    inferredTypes.set(item.id, item.type);
+                }
+                console.log(`Loaded inferred types for ${inferredTypes.size} nodes from ${inferInfoPath}`);
+            } else {
+                console.warn(`Inferred types file not found at ${inferInfoPath}, skipping loading inferred types`);
+            }
+        } catch (err) {
+            console.error(`Error loading inferred types: ${err}`);
+        }
 
         // 遍历所有边
         for (const [_, edgeSet] of this.toEdges) {
@@ -322,15 +384,34 @@ export class TypeGraph {
                 if (edge.type === "returnAnnotation") inferredState = fromState ? fromState.getReturnType() : null;
 
                 if (!inferredState) {
-                    result.missing++;
-                    result.wrongEdges.push({
-                        kind: edge.type,
-                        from: edge.from,
-                        to: edge.to,
-                        inferredType: "unknown",
-                        expectedType: expectedTypeStr
-                    });
-                    continue;
+                    if (inferredTypes.has(edge.from)) {
+                        const inferredTypeStr = inferredTypes.get(edge.from)!;
+                        switch (inferredTypeStr) {
+                            case "number":
+                                inferredState = new DeterminantNodeState(tNode.NUMBER);
+                                break;
+                            case "string":
+                                inferredState = new DeterminantNodeState(tNode.STRING);
+                                break;
+                            case "boolean":
+                                inferredState = new DeterminantNodeState(tNode.BOOLEAN);
+                                break;
+                            default:
+                                console.warn(`Unrecognized inferred type string "${inferredTypeStr}" for node ${edge.from}, treating as unknown`);
+                                inferredState = new DeterminantNodeState(tNode.UNKNOWN);
+                        }
+                    } else {
+                        // 没有推导类型信息，视为缺失
+                        result.missing++;
+                        result.wrongEdges.push({
+                            kind: edge.type,
+                            from: edge.from,
+                            to: edge.to,
+                            inferredType: "unknown",
+                            expectedType: expectedTypeStr
+                        });
+                        continue;
+                    }
                 }
 
                 const inferredTypeStr = inferredState.toString();

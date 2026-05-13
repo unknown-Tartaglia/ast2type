@@ -9,12 +9,18 @@ program
   .option("-i, --input <inputDir>", "Input source code directory or ArkTS project root")
   .option("-o, --output <outputDir>", "Output AST directory (default: ./output/ast)");
 
-program.parse(process.argv);
-const options = program.opts();
-
-const fallbackInputDir = path.resolve("./");
-const userInputDir = options.input ? path.resolve(options.input) : fallbackInputDir;
-const outputDir = options.output ? path.resolve(options.output + "/ast") : path.resolve(options.input.replace(/[\\\/]+$/, "") + "_output/ast");
+// 仅在作为主脚本运行时解析命令行参数，被 import 时跳过
+let userInputDir: string;
+let outputDir: string;
+if (require.main === module) {
+  program.parse(process.argv);
+  const options = program.opts();
+  userInputDir = options.input ? path.resolve(options.input) : path.resolve("./");
+  outputDir = options.output ? path.resolve(options.output + "/ast") : path.resolve(userInputDir.replace(/[\\\/]+$/, "") + "_output/ast");
+} else {
+  userInputDir = path.resolve("./");
+  outputDir = path.resolve("./output/ast");
+}
 
 const project = new Project({
   tsConfigFilePath: path.resolve("./tsconfig.json"),

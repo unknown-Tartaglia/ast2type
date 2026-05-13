@@ -12,12 +12,14 @@ import { RuleStore } from "./ast2type/rule";
 const program = new Command();
 program
   .requiredOption("-i, --input <inputDir>", "Input AST JSON directory")
-  .option("-o, --output <outputDir>", "Output directory (default: ./output)");
+  .option("-o, --output <outputDir>", "Output directory (default: ./output)")
+  .option("-g, --groundtruth <path>", "Path to ground truth JSON for annotation injection");
 program.parse(process.argv);
 
 const options = program.opts();
 const inputDir = path.resolve(options.input);
 const outputDir = options.output ? path.resolve(options.output) : path.resolve("./output");
+const groundtruthOption: string | undefined = options.groundtruth ? path.resolve(options.groundtruth) : undefined;
 
 const LOG_SCOPE = false; // 是否开启日志作用域
 export const LOG_TYPENODE = false; // 是否开启类型节点日志
@@ -1347,6 +1349,96 @@ function resolveImportPath(currentFilePath: string, importSpecifier: string): st
   }
 }
 
+// 从 ground truth JSON 注入标注信息：通过位置匹配找到 varId，创建合成类型节点，注入 annotation 边
+function injectGroundTruth(groundtruthPath: string) {
+  type AnnotationEntry = {
+    identifier: string;
+    offset: number;
+    line: number;
+    col: number;
+    type: string;
+    kind: "param" | "return" | "variable";
+  };
+  type GroundTruth = Record<string, AnnotationEntry[]>;
+
+  if (!fs.existsSync(groundtruthPath)) {
+    console.warn(`Ground truth file not found: ${groundtruthPath}, skipping injection`);
+    return;
+  }
+
+  const groundtruth: GroundTruth = JSON.parse(fs.readFileSync(groundtruthPath, "utf8"));
+  let injectedCount = 0;
+  let missedCount = 0;
+
+  for (const [filePath, annotations] of Object.entries(groundtruth)) {
+    // Normalize ground truth file path for matching with meta.file (which uses '^' as separator)
+    const normalizedGtPath = filePath.replace(/\//g, "\\");
+
+    for (const ann of annotations) {
+      // Find varId by (offset + identifier text + file path) matching in the erased AST
+      let targetVarId: number | undefined;
+      for (const [varId, offset_] of meta.offset) {
+        if (offset_ !== ann.offset) continue;
+        // For param/variable, verify identifier text matches.
+        // For return, skip text check – arrow function text changes after erasure.
+        if (ann.kind !== "return") {
+          const metaText = meta.text.get(varId);
+          if (metaText !== ann.identifier) continue;
+        }
+        // Check file name match — try full path suffix first, then basename fallback
+        const metaFile = meta.file.get(varId) || "";
+        const normalizedMeta = metaFile.replace(/\^/g, "\\").replace(/\.ast\.json$/, "");
+        if (normalizedMeta.endsWith(normalizedGtPath)) {
+          targetVarId = varId;
+          break;
+        }
+        // Fallback: match by filename only (for when code2ast's input dir differs)
+        if (path.basename(normalizedMeta) === path.basename(normalizedGtPath)) {
+          targetVarId = varId;
+          break;
+        }
+      }
+
+      if (targetVarId === undefined) {
+        console.warn(`Ground truth: could not find varId for "${ann.identifier}" at offset ${ann.offset} in ${filePath}`);
+        missedCount++;
+        continue;
+      }
+
+      // Map type string to primitive TypeId
+      const primTypeMap: Record<string, number> = {
+        number: tNode.NUMBER,
+        string: tNode.STRING,
+        boolean: tNode.BOOLEAN,
+        void: tNode.VOID,
+        any: tNode.ANY,
+        undefined: tNode.UNDEFINED,
+      };
+
+      const typeId = primTypeMap[ann.type];
+      if (typeId === undefined) {
+        console.warn(`Ground truth: unsupported type "${ann.type}" for "${ann.identifier}"`);
+        missedCount++;
+        continue;
+      }
+
+      // Create synthetic varId for the type annotation node
+      const syntheticVarId = typeVarCounter++;
+
+      // Emit: allocate primitive type on the synthetic varId, then create annotation edge
+      emit.allocPrimitive(syntheticVarId, typeId);
+      if (ann.kind === "return") {
+        emit.returnAnnot(targetVarId, syntheticVarId);
+      } else {
+        emit.annot(targetVarId, syntheticVarId);
+      }
+      injectedCount++;
+    }
+  }
+
+  console.log(`Ground truth injected: ${injectedCount} annotations (${missedCount} missed)`);
+}
+
 function main() {
 
   const astFiles = getAstFiles(inputDir);
@@ -1361,6 +1453,10 @@ function main() {
     secondPass(file, fileToAst[file]);
   }
 
+  // Optional: inject ground truth annotations for evaluation
+  if (groundtruthOption) {
+    injectGroundTruth(groundtruthOption);
+  }
 
   solver.solve(fact);
   solver.output();

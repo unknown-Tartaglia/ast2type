@@ -70,9 +70,11 @@ export class Solver {
         writeJsonStream(jsonOut, jsonGraph);
 
         // 写出类型标注
-        const anno = this.graph.toAnno();
+        const [anno, unk] = this.graph.toAnno();
         const annoOut = path.join(outputDir, "typeinfo.json");
         writeJsonStream(annoOut, anno);
+        const unkOut = path.join(outputDir, "unkinfo.json");
+        writeJsonStream(unkOut, unk);
 
         // 按 file 分组
         const groups : Record<string, any> = {};
