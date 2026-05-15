@@ -21,4 +21,7 @@ export class MetaStore {
   paramIndex = new Map<VarId, number>();
   funcParamMap = new Map<VarId, Map<number, VarId>>(); // funcVarId -> (paramIdx -> paramVarId)
   funcBindMap = new Map<VarId, VarId>(); // bindVarId -> funcVarId (标识符绑定到函数)
+
+  // 声明种类映射：标识符 varId -> 声明节点种类 (Parameter, VariableDeclaration, FunctionDeclaration 等)
+  declKind = new Map<VarId, string>();
 }

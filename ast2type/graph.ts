@@ -253,24 +253,11 @@ export class TypeGraph {
         for (const [nodeId, state] of this.nodes) {
             const id = nodeId;
             const ty = tNode.get(state.val);
+            let file = meta.file.get(id);
+            let relapath = file ? file.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "") : "unknown_relapath";
+            file = file ? path.join(file.split("ast" + require("path").sep)[0].replace("_output", ""), file.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")) : "unknown_file";
             if (!meta.v8Kind.has(id)) continue;
-            if (state.toAnno() === "unknown") {
-                console.error(`Node ${id} has unknown type, skipping annotation output`);
-                unkJson.push({
-                    id: id,
-                    context: meta.context.get(id) || "",
-                    exprText: meta.text.get(id) || "",
-                    exprKind: meta.v8Kind.get(id) || "",
-                    morphKind: meta.kind.get(id) || "",
-                    location: meta.offset.get(id) || -1,
-                    pos: meta.pos.get(id) || null,
-                    type: "unknown",
-                    constant: ty?.kind === "literal" ? ty.value : undefined,
-                    relapath: meta.file.get(id)!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, ""),
-                    file: path.join(meta.file.get(id)!.split("ast" + require("path").sep)[0].replace("_output", ""), meta.file.get(id)!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")),
-                });
-                continue;
-            }
+            if (state.toAnno() === "unknown") continue;
             outJson.push({
                 context: meta.context.get(id) || "",
                 exprText: meta.text.get(id) || "",
@@ -280,30 +267,30 @@ export class TypeGraph {
                 pos: meta.pos.get(id) || null,
                 type: state.toAnno(),
                 constant: ty?.kind === "literal" ? ty.value : undefined,
-                relapath: meta.file.get(id)!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, ""),
-                file: path.join(meta.file.get(id)!.split("ast" + require("path").sep)[0].replace("_output", ""), meta.file.get(id)!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")),
+                relapath: relapath,
+                file: file,
             })
         }
         for (const edge of this.toEdges.values()) {
             for (const e of edge) {
-                if (e.type === "annotation" || e.type === "returnAnnotation") {
-                    if (!this.nodes.has(e.from)) {
-                        const id = e.from;
-                        let file = meta.file.get(id);
-                        file = file ? path.join(file.split("ast" + require("path").sep)[0].replace("_output", ""), file.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")) : "unknown_file";
-                        unkJson.push({
-                            id: id,
-                            context: meta.context.get(id) || "",
-                            exprText: meta.text.get(id) || "",
-                            exprKind: meta.v8Kind.get(id) || "",
-                            morphKind: meta.kind.get(id) || "",
-                            location: meta.offset.get(id) || -1,
-                            pos: meta.pos.get(id) || null,
-                            type: "unknown",
-                            relapath: meta.file.get(id)!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, ""),
-                            file: path.join(meta.file.get(id)!.split("ast" + require("path").sep)[0].replace("_output", ""), meta.file.get(id)!.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")),
-                        });
-                    }
+                let id = e.from;
+                // 筛选无入边且无类型信息的节点（即完全孤立的节点，可能是某些特殊表达式或标识符），加入未知列表
+                if (this.getFromEdges(id).size === 0 && !this.nodes.has(id)) {
+                    let file = meta.file.get(id);
+                    let relapath = file ? file.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "") : "unknown_relapath";
+                    file = file ? path.join(file.split("ast" + require("path").sep)[0].replace("_output", ""), file.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")) : "unknown_file";
+                    unkJson.push({
+                        id: id,
+                        context: meta.context.get(id) || "",
+                        exprText: meta.text.get(id) || "",
+                        exprKind: meta.v8Kind.get(id) || "",
+                        morphKind: meta.kind.get(id) || "",
+                        location: meta.offset.get(id) || -1,
+                        pos: meta.pos.get(id) || null,
+                        type: "unknown",
+                        relapath: relapath,
+                        file: file,
+                    });
                 }
             }
         }

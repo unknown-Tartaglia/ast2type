@@ -90,6 +90,43 @@ export class Solver {
             writeJsonStream(outfile, groups[file]);
         }
 
+        // 写出盲找声明位置（所有标识符声明节点，供 LLM 推断类型）
+        const blindspots: any[] = [];
+        for (const [id, kind] of meta.declKind) {
+            const entry: any = {
+                id,
+                identifier: meta.text.get(id) || "",
+                kind,
+                offset: meta.offset.get(id) ?? -1,
+                pos: meta.pos.get(id) || null,
+            };
+            const fullPath = meta.file.get(id);
+            if (fullPath) {
+                const parts = fullPath.split("ast" + require("path").sep);
+                entry.file = path.join(parts[0] || "", parts[1] || "").replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "");
+            } else {
+                entry.file = "unknown";
+            }
+            entry.context = meta.context.get(id) || "";
+            // 寻找父函数名（仅 Parameter 需要）
+            let fnName = "";
+            if (kind === "Parameter") {
+                for (const [funcVarId, paramMap] of meta.funcParamMap) {
+                    for (const param of paramMap.values()) {
+                        if (param === id) {
+                            fnName = meta.funcName.get(funcVarId) || "";
+                            break;
+                        }
+                    }
+                    if (fnName) break;
+                }
+            }
+            entry.function = fnName;
+            blindspots.push(entry);
+        }
+        const blindspotsOut = path.join(outputDir, "blindspots.json");
+        writeJsonStream(blindspotsOut, blindspots);
+
         // 评估标注
         const evalResult = this.graph.evaluate();
         const evalOut = path.join(outputDir, "evaluation.json");

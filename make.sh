@@ -12,4 +12,4 @@ dir=${in%/}
 # rm -rf output
 node --max-old-space-size=40960 -r ts-node/register eraseAnnotation.ts -i "$dir" -o "${dir}_erase"
 node --max-old-space-size=40960 -r ts-node/register code2ast.ts -i "${dir}_erase"
-node --max-old-space-size=40960 -r ts-node/register ast2type.ts -i "${dir}_erase_output" -g "${dir}_erase/_groundtruth.json"
+node --max-old-space-size=40960 -r ts-node/register ast2type.ts -i "${dir}_erase_output" -g "${dir}_erase/_groundtruth.json" -f "output/feedback.json"

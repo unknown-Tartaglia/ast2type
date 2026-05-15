@@ -13,13 +13,15 @@ const program = new Command();
 program
   .requiredOption("-i, --input <inputDir>", "Input AST JSON directory")
   .option("-o, --output <outputDir>", "Output directory (default: ./output)")
-  .option("-g, --groundtruth <path>", "Path to ground truth JSON for annotation injection");
+  .option("-g, --groundtruth <path>", "Path to ground truth JSON for annotation injection")
+  .option("-f, --feedback <path>", "Path to feedback JSON for type injection (LLM-inferred types)");
 program.parse(process.argv);
 
 const options = program.opts();
 const inputDir = path.resolve(options.input);
 const outputDir = options.output ? path.resolve(options.output) : path.resolve("./output");
 const groundtruthOption: string | undefined = options.groundtruth ? path.resolve(options.groundtruth) : undefined;
+const feedbackOption: string | undefined = options.feedback ? path.resolve(options.feedback) : undefined;
 
 const LOG_SCOPE = false; // 是否开启日志作用域
 export const LOG_TYPENODE = false; // 是否开启类型节点日志
@@ -273,6 +275,7 @@ function secondPass(filePath: string, node: AstNode) {
         if (idNode && idNode.varId !== undefined && idNode.text) {
           varBindings.set(idNode.text, idNode.varId!);
           meta.funcName.set(node.varId!, idNode.text);
+          meta.declKind.set(idNode.varId!, "FunctionDeclaration");
           emit.allocFunction(node.varId!, idNode.varId);
           if (node.varId !== idNode.varId) {
               meta.funcBindMap.set(idNode.varId, node.varId!);
@@ -297,6 +300,7 @@ function secondPass(filePath: string, node: AstNode) {
     FunctionExpression(node) {
       meta.v8Kind.set(node.varId!, "FunctionLiteral");
       emit.allocFunction(node.varId!, node.varId!);
+      meta.declKind.set(node.varId!, "FunctionExpression");
       if (node.children) {
         const idNode = node;
         const index = node.children?.findIndex(n => n.kind === "ColonToken");
@@ -324,10 +328,12 @@ function secondPass(filePath: string, node: AstNode) {
       let fa = findParentByKind(node, "VariableDeclarationList");
       if (fa && fa.kind === "VariableDeclarationList" && fa.parent && fa.parent.kind === "ForOfStatement") {
         paramBindings.set(left.text!, left.varId!);
+        meta.declKind.set(left.varId!, "VariableDeclaration");
       } else {
         if (LOG_IDENTIFIER_NODE)
           console.log(`Variable ${left.text} has ID ${left.varId}`);
         varBindings.set(left.text!, left.varId!);
+        meta.declKind.set(left.varId!, "VariableDeclaration");
       }
       // 处理类型注解
       if (colonTokenIndex && colonTokenIndex !== -1) {
@@ -371,6 +377,7 @@ function secondPass(filePath: string, node: AstNode) {
         if (!paramIdNode || !paramIdNode.varId) return;
         paramBindings.set(paramIdNode.text!, paramIdNode.varId!);
         meta.paramName.set(paramIdNode.varId!, paramIdNode.text!);
+        meta.declKind.set(paramIdNode.varId!, "Parameter");
 
         // 处理类型注解
         const colonIndex = node.children?.findIndex(n => n.kind === "ColonToken");
@@ -505,6 +512,7 @@ function secondPass(filePath: string, node: AstNode) {
         }
 
         meta.funcName.set(node.varId!, methodIdNode.text!);
+        meta.declKind.set(methodIdNode.varId!, "MethodSignature");
         emit.allocFunction(node.varId!, methodIdNode.varId!);
         if (node.varId !== methodIdNode.varId) {
             meta.funcBindMap.set(methodIdNode.varId!, node.varId!);
@@ -599,6 +607,7 @@ function secondPass(filePath: string, node: AstNode) {
           }
 
           meta.funcName.set(node.varId!, propIdNode.text!);
+          meta.declKind.set(propIdNode.varId!, "MethodDeclaration");
           emit.allocFunction(node.varId!, propIdNode.varId!);
           if (node.varId !== propIdNode.varId) {
               meta.funcBindMap.set(propIdNode.varId!, node.varId!);
@@ -1194,6 +1203,7 @@ function secondPass(filePath: string, node: AstNode) {
       // TODO: 其余操作
       if (node.children) {
         emit.allocFunction(node.varId!, node.varId!);
+        meta.declKind.set(node.varId!, "ArrowFunction");
         const index = node.children?.findIndex(n => n.kind === "ColonToken");
         // 类型注解
         if (index !== undefined && index !== -1) {
@@ -1439,6 +1449,51 @@ function injectGroundTruth(groundtruthPath: string) {
   console.log(`Ground truth injected: ${injectedCount} annotations (${missedCount} missed)`);
 }
 
+// 从 feedback JSON 注入 LLM 推断类型：创建合成类型节点，通过 flow 边绑定到目标标识符
+function injectFeedback(feedbackPath: string) {
+  type FeedbackEntry = { id: number; type: string };
+  type FeedbackData = FeedbackEntry[];
+
+  if (!fs.existsSync(feedbackPath)) {
+    console.warn(`Feedback file not found: ${feedbackPath}, skipping injection`);
+    return;
+  }
+
+  const feedback: FeedbackData = JSON.parse(fs.readFileSync(feedbackPath, "utf8"));
+  let injectedCount = 0;
+  let missedCount = 0;
+
+  const primTypeMap: Record<string, number> = {
+    number: tNode.NUMBER,
+    string: tNode.STRING,
+    boolean: tNode.BOOLEAN,
+    void: tNode.VOID,
+    any: tNode.ANY,
+    undefined: tNode.UNDEFINED,
+  };
+
+  for (const entry of feedback) {
+    const targetVarId = entry.id;
+    const typeId = primTypeMap[entry.type];
+    if (typeId === undefined) {
+      console.warn(`Feedback: unsupported type "${entry.type}" for id ${entry.id}`);
+      missedCount++;
+      continue;
+    }
+
+    // 创建合成 varId 用于类型节点
+    const syntheticVarId = typeVarCounter++;
+
+    // 分配原始类型到合成节点
+    emit.allocPrimitive(syntheticVarId, typeId);
+    // 通过 flow 边将类型绑定到目标标识符（solver 通过 sameType 边传播）
+    emit.flow(syntheticVarId, targetVarId, "external feedback");
+    injectedCount++;
+  }
+
+  console.log(`Feedback injected: ${injectedCount} entries (${missedCount} missed)`);
+}
+
 function main() {
 
   const astFiles = getAstFiles(inputDir);
@@ -1456,6 +1511,11 @@ function main() {
   // Optional: inject ground truth annotations for evaluation
   if (groundtruthOption) {
     injectGroundTruth(groundtruthOption);
+  }
+
+  // Optional: inject LLM-inferred types as feedback
+  if (feedbackOption) {
+    injectFeedback(feedbackOption);
   }
 
   solver.solve(fact);
