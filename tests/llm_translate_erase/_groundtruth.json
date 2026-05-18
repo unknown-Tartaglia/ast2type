@@ -1,0 +1,712 @@
+{
+  "case.ts": [
+    {
+      "identifier": "id",
+      "offset": 22,
+      "line": 2,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "name",
+      "offset": 36,
+      "line": 3,
+      "col": 3,
+      "type": "string",
+      "kind": "variable"
+    },
+    {
+      "identifier": "price",
+      "offset": 52,
+      "line": 4,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "discount",
+      "offset": 69,
+      "line": 5,
+      "col": 3,
+      "type": "number | null",
+      "kind": "variable"
+    },
+    {
+      "identifier": "inStock",
+      "offset": 97,
+      "line": 6,
+      "col": 3,
+      "type": "boolean",
+      "kind": "variable"
+    },
+    {
+      "identifier": "id",
+      "offset": 149,
+      "line": 10,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "name",
+      "offset": 163,
+      "line": 11,
+      "col": 3,
+      "type": "string",
+      "kind": "variable"
+    },
+    {
+      "identifier": "finalPrice",
+      "offset": 179,
+      "line": 12,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "inStock",
+      "offset": 201,
+      "line": 13,
+      "col": 3,
+      "type": "boolean",
+      "kind": "variable"
+    },
+    {
+      "identifier": "processProducts",
+      "offset": 231,
+      "line": 16,
+      "col": 10,
+      "type": "ProcessedProduct[]",
+      "kind": "return"
+    },
+    {
+      "identifier": "products",
+      "offset": 247,
+      "line": 16,
+      "col": 26,
+      "type": "any[]",
+      "kind": "param"
+    },
+    {
+      "identifier": "(p: any): p is Product => p && typeof p === 'object' && p.inStock === true",
+      "offset": 370,
+      "line": 22,
+      "col": 13,
+      "type": "p is Product",
+      "kind": "return"
+    },
+    {
+      "identifier": "p",
+      "offset": 371,
+      "line": 22,
+      "col": 14,
+      "type": "any",
+      "kind": "param"
+    },
+    {
+      "identifier": "p",
+      "offset": 456,
+      "line": 23,
+      "col": 11,
+      "type": "Product",
+      "kind": "param"
+    }
+  ],
+  "case1.ts": [
+    {
+      "identifier": "wordCount",
+      "offset": 29,
+      "line": 2,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "charCount",
+      "offset": 50,
+      "line": 3,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "longestWord",
+      "offset": 71,
+      "line": 4,
+      "col": 3,
+      "type": "string",
+      "kind": "variable"
+    },
+    {
+      "identifier": "averageLength",
+      "offset": 94,
+      "line": 5,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "analyzeText",
+      "offset": 129,
+      "line": 8,
+      "col": 10,
+      "type": "AnalysisResult",
+      "kind": "return"
+    },
+    {
+      "identifier": "text",
+      "offset": 141,
+      "line": 8,
+      "col": 22,
+      "type": "any",
+      "kind": "param"
+    },
+    {
+      "identifier": "w",
+      "offset": 336,
+      "line": 13,
+      "col": 50,
+      "type": "string",
+      "kind": "param"
+    },
+    {
+      "identifier": "word",
+      "offset": 502,
+      "line": 20,
+      "col": 18,
+      "type": "string",
+      "kind": "param"
+    }
+  ],
+  "case10.ts": [
+    {
+      "identifier": "charFrequency",
+      "offset": 9,
+      "line": 1,
+      "col": 10,
+      "type": "Record<string, number>",
+      "kind": "return"
+    },
+    {
+      "identifier": "str",
+      "offset": 23,
+      "line": 1,
+      "col": 24,
+      "type": "string",
+      "kind": "param"
+    },
+    {
+      "identifier": "frequency",
+      "offset": 123,
+      "line": 6,
+      "col": 9,
+      "type": "Record<string, number>",
+      "kind": "variable"
+    }
+  ],
+  "case2.ts": [
+    {
+      "identifier": "arrayIntersection",
+      "offset": 9,
+      "line": 1,
+      "col": 10,
+      "type": "T[]",
+      "kind": "return"
+    },
+    {
+      "identifier": "arr1",
+      "offset": 30,
+      "line": 1,
+      "col": 31,
+      "type": "T[]",
+      "kind": "param"
+    },
+    {
+      "identifier": "arr2",
+      "offset": 41,
+      "line": 1,
+      "col": 42,
+      "type": "T[]",
+      "kind": "param"
+    },
+    {
+      "identifier": "intersection",
+      "offset": 171,
+      "line": 7,
+      "col": 9,
+      "type": "T[]",
+      "kind": "variable"
+    }
+  ],
+  "case3.ts": [
+    {
+      "identifier": "username",
+      "offset": 19,
+      "line": 2,
+      "col": 3,
+      "type": "string",
+      "kind": "variable"
+    },
+    {
+      "identifier": "age",
+      "offset": 40,
+      "line": 3,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "email",
+      "offset": 56,
+      "line": 4,
+      "col": 3,
+      "type": "string",
+      "kind": "variable"
+    },
+    {
+      "identifier": "valid",
+      "offset": 106,
+      "line": 8,
+      "col": 3,
+      "type": "boolean",
+      "kind": "variable"
+    },
+    {
+      "identifier": "errors",
+      "offset": 124,
+      "line": 9,
+      "col": 3,
+      "type": "string[]",
+      "kind": "variable"
+    },
+    {
+      "identifier": "validateUser",
+      "offset": 154,
+      "line": 12,
+      "col": 10,
+      "type": "ValidationResult",
+      "kind": "return"
+    },
+    {
+      "identifier": "user",
+      "offset": 167,
+      "line": 12,
+      "col": 23,
+      "type": "any",
+      "kind": "param"
+    },
+    {
+      "identifier": "errors",
+      "offset": 319,
+      "line": 17,
+      "col": 9,
+      "type": "string[]",
+      "kind": "variable"
+    }
+  ],
+  "case4.ts": [
+    {
+      "identifier": "average",
+      "offset": 20,
+      "line": 2,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "min",
+      "offset": 39,
+      "line": 3,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "max",
+      "offset": 54,
+      "line": 4,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "sum",
+      "offset": 69,
+      "line": 5,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "calculateStats",
+      "offset": 94,
+      "line": 8,
+      "col": 10,
+      "type": "Stats",
+      "kind": "return"
+    },
+    {
+      "identifier": "numbers",
+      "offset": 109,
+      "line": 8,
+      "col": 25,
+      "type": "any[]",
+      "kind": "param"
+    },
+    {
+      "identifier": "(n: any): n is number => typeof n === 'number' && !isNaN(n)",
+      "offset": 261,
+      "line": 13,
+      "col": 39,
+      "type": "n is number",
+      "kind": "return"
+    },
+    {
+      "identifier": "n",
+      "offset": 262,
+      "line": 13,
+      "col": 40,
+      "type": "any",
+      "kind": "param"
+    },
+    {
+      "identifier": "acc",
+      "offset": 450,
+      "line": 19,
+      "col": 36,
+      "type": "number",
+      "kind": "param"
+    },
+    {
+      "identifier": "num",
+      "offset": 463,
+      "line": 19,
+      "col": 49,
+      "type": "number",
+      "kind": "param"
+    }
+  ],
+  "case5.ts": [
+    {
+      "identifier": "daysBetween",
+      "offset": 9,
+      "line": 1,
+      "col": 10,
+      "type": "number | null",
+      "kind": "return"
+    },
+    {
+      "identifier": "date1",
+      "offset": 21,
+      "line": 1,
+      "col": 22,
+      "type": "string",
+      "kind": "param"
+    },
+    {
+      "identifier": "date2",
+      "offset": 36,
+      "line": 1,
+      "col": 37,
+      "type": "string",
+      "kind": "param"
+    }
+  ],
+  "case6.ts": [
+    {
+      "identifier": "id",
+      "offset": 19,
+      "line": 2,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "name",
+      "offset": 33,
+      "line": 3,
+      "col": 3,
+      "type": "string",
+      "kind": "variable"
+    },
+    {
+      "identifier": "price",
+      "offset": 49,
+      "line": 4,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "category",
+      "offset": 67,
+      "line": 5,
+      "col": 3,
+      "type": "string",
+      "kind": "variable"
+    },
+    {
+      "identifier": "id",
+      "offset": 114,
+      "line": 9,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "name",
+      "offset": 128,
+      "line": 10,
+      "col": 3,
+      "type": "string",
+      "kind": "variable"
+    },
+    {
+      "identifier": "price",
+      "offset": 144,
+      "line": 11,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "category",
+      "offset": 191,
+      "line": 15,
+      "col": 4,
+      "type": "string",
+      "kind": "param"
+    },
+    {
+      "identifier": "groupByCategory",
+      "offset": 237,
+      "line": 18,
+      "col": 10,
+      "type": "GroupedItems",
+      "kind": "return"
+    },
+    {
+      "identifier": "items",
+      "offset": 253,
+      "line": 18,
+      "col": 26,
+      "type": "any[]",
+      "kind": "param"
+    },
+    {
+      "identifier": "result",
+      "offset": 342,
+      "line": 23,
+      "col": 9,
+      "type": "GroupedItems",
+      "kind": "variable"
+    },
+    {
+      "identifier": "item",
+      "offset": 387,
+      "line": 25,
+      "col": 18,
+      "type": "any",
+      "kind": "param"
+    }
+  ],
+  "case7.ts": [
+    {
+      "identifier": "value",
+      "offset": 35,
+      "line": 1,
+      "col": 36,
+      "type": "any",
+      "kind": "param"
+    },
+    {
+      "identifier": "key",
+      "offset": 84,
+      "line": 4,
+      "col": 4,
+      "type": "string",
+      "kind": "param"
+    },
+    {
+      "identifier": "searchItems",
+      "offset": 123,
+      "line": 7,
+      "col": 10,
+      "type": "any[]",
+      "kind": "return"
+    },
+    {
+      "identifier": "items",
+      "offset": 135,
+      "line": 7,
+      "col": 22,
+      "type": "any[]",
+      "kind": "param"
+    },
+    {
+      "identifier": "filters",
+      "offset": 149,
+      "line": 7,
+      "col": 36,
+      "type": "Filters",
+      "kind": "param"
+    }
+  ],
+  "case8.ts": [
+    {
+      "identifier": "key",
+      "offset": 22,
+      "line": 2,
+      "col": 4,
+      "type": "string",
+      "kind": "param"
+    },
+    {
+      "identifier": "formatString",
+      "offset": 53,
+      "line": 5,
+      "col": 10,
+      "type": "string",
+      "kind": "return"
+    },
+    {
+      "identifier": "template",
+      "offset": 66,
+      "line": 5,
+      "col": 23,
+      "type": "string",
+      "kind": "param"
+    },
+    {
+      "identifier": "values",
+      "offset": 84,
+      "line": 5,
+      "col": 41,
+      "type": "Values",
+      "kind": "param"
+    }
+  ],
+  "case9.ts": [
+    {
+      "identifier": "data",
+      "offset": 33,
+      "line": 2,
+      "col": 3,
+      "type": "T[]",
+      "kind": "variable"
+    },
+    {
+      "identifier": "page",
+      "offset": 46,
+      "line": 3,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "pageSize",
+      "offset": 62,
+      "line": 4,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "total",
+      "offset": 82,
+      "line": 5,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "totalPages",
+      "offset": 99,
+      "line": 6,
+      "col": 3,
+      "type": "number",
+      "kind": "variable"
+    },
+    {
+      "identifier": "paginate",
+      "offset": 131,
+      "line": 9,
+      "col": 10,
+      "type": "PaginatedResult<T>",
+      "kind": "return"
+    },
+    {
+      "identifier": "items",
+      "offset": 146,
+      "line": 10,
+      "col": 3,
+      "type": "T[]",
+      "kind": "param"
+    },
+    {
+      "identifier": "page",
+      "offset": 160,
+      "line": 11,
+      "col": 3,
+      "type": "number",
+      "kind": "param"
+    },
+    {
+      "identifier": "pageSize",
+      "offset": 177,
+      "line": 12,
+      "col": 3,
+      "type": "number",
+      "kind": "param"
+    },
+    {
+      "identifier": "sortBy",
+      "offset": 198,
+      "line": 13,
+      "col": 3,
+      "type": "string | ((a: T, b: T) => number)",
+      "kind": "param"
+    },
+    {
+      "identifier": "a",
+      "offset": 218,
+      "line": 13,
+      "col": 23,
+      "type": "T",
+      "kind": "param"
+    },
+    {
+      "identifier": "b",
+      "offset": 224,
+      "line": 13,
+      "col": 29,
+      "type": "T",
+      "kind": "param"
+    },
+    {
+      "identifier": "a",
+      "offset": 584,
+      "line": 25,
+      "col": 25,
+      "type": "any",
+      "kind": "param"
+    },
+    {
+      "identifier": "b",
+      "offset": 592,
+      "line": 25,
+      "col": 33,
+      "type": "any",
+      "kind": "param"
+    },
+    {
+      "identifier": "pageSizeNum",
+      "offset": 821,
+      "line": 36,
+      "col": 7,
+      "type": "number",
+      "kind": "variable"
+    }
+  ]
+}

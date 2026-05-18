@@ -1,12 +1,14 @@
 import * as fs from "fs";
 import * as path from "path";
 import { Command } from "commander";
-import { FactStore, Emitter, VarId } from "./ast2type/fact"
+import { FactStore, Emitter, VarId, Fact } from "./ast2type/fact"
 import { MetaStore } from "./ast2type/meta"
 import { Solver } from "./ast2type/solver";
 import { tNodeStore } from "./ast2type/nType";
 import { DeterminantStrategy } from "./ast2type/strategy";
 import { RuleStore } from "./ast2type/rule";
+import { inferTypes } from "./agent/infer";
+import { Graph } from "@langchain/core/runnables/graph";
 
 // 命令行参数解析
 const program = new Command();
@@ -14,7 +16,10 @@ program
   .requiredOption("-i, --input <inputDir>", "Input AST JSON directory")
   .option("-o, --output <outputDir>", "Output directory (default: ./output)")
   .option("-g, --groundtruth <path>", "Path to ground truth JSON for annotation injection")
-  .option("-f, --feedback <path>", "Path to feedback JSON for type injection (LLM-inferred types)");
+  .option("-f, --feedback <path>", "Path to feedback JSON for type injection (LLM-inferred types)")
+  .option("--agent", "Enable LLM agent to infer unknown declaration types in-loop")
+  .option("--sourcedir <dir>", "Erased source directory for agent (auto-derived if omitted)")
+  .option("--api-key <key>", "API key for agent (or set DEEPSEEK_API_KEY env var)");
 program.parse(process.argv);
 
 const options = program.opts();
@@ -22,6 +27,9 @@ const inputDir = path.resolve(options.input);
 const outputDir = options.output ? path.resolve(options.output) : path.resolve("./output");
 const groundtruthOption: string | undefined = options.groundtruth ? path.resolve(options.groundtruth) : undefined;
 const feedbackOption: string | undefined = options.feedback ? path.resolve(options.feedback) : undefined;
+const agentMode: boolean = !!options.agent;
+const agentApiKey: string = options.apiKey || process.env.DEEPSEEK_API_KEY || "";
+const sourcedirOption: string | undefined = options.sourcedir ? path.resolve(options.sourcedir) : undefined;
 
 const LOG_SCOPE = false; // 是否开启日志作用域
 export const LOG_TYPENODE = false; // 是否开启类型节点日志
@@ -1372,7 +1380,7 @@ function injectGroundTruth(groundtruthPath: string) {
   type GroundTruth = Record<string, AnnotationEntry[]>;
 
   if (!fs.existsSync(groundtruthPath)) {
-    console.warn(`Ground truth file not found: ${groundtruthPath}, skipping injection`);
+    console.error(`Ground truth file not found: ${groundtruthPath}, skipping injection`);
     return;
   }
 
@@ -1410,7 +1418,7 @@ function injectGroundTruth(groundtruthPath: string) {
       }
 
       if (targetVarId === undefined) {
-        console.warn(`Ground truth: could not find varId for "${ann.identifier}" at offset ${ann.offset} in ${filePath}`);
+        console.error(`Ground truth: could not find varId for "${ann.identifier}" at offset ${ann.offset} in ${filePath}`);
         missedCount++;
         continue;
       }
@@ -1427,7 +1435,7 @@ function injectGroundTruth(groundtruthPath: string) {
 
       const typeId = primTypeMap[ann.type];
       if (typeId === undefined) {
-        console.warn(`Ground truth: unsupported type "${ann.type}" for "${ann.identifier}"`);
+        console.error(`Ground truth: unsupported type "${ann.type}" for "${ann.identifier}"`);
         missedCount++;
         continue;
       }
@@ -1442,6 +1450,7 @@ function injectGroundTruth(groundtruthPath: string) {
       } else {
         emit.annot(targetVarId, syntheticVarId);
       }
+      console.log(`Injected ground truth for "${ann.identifier}" at offset ${ann.offset} in ${filePath} with type "${ann.type}" (varId ${targetVarId})`);
       injectedCount++;
     }
   }
@@ -1450,18 +1459,11 @@ function injectGroundTruth(groundtruthPath: string) {
 }
 
 // 从 feedback JSON 注入 LLM 推断类型：创建合成类型节点，通过 flow 边绑定到目标标识符
-function injectFeedback(feedbackPath: string) {
-  type FeedbackEntry = { id: number; type: string };
-  type FeedbackData = FeedbackEntry[];
-
-  if (!fs.existsSync(feedbackPath)) {
-    console.warn(`Feedback file not found: ${feedbackPath}, skipping injection`);
-    return;
-  }
-
-  const feedback: FeedbackData = JSON.parse(fs.readFileSync(feedbackPath, "utf8"));
+type FeedbackEntry = { id: number; type: string };
+function injectFeedback(feedback: FeedbackEntry[]) {
   let injectedCount = 0;
   let missedCount = 0;
+  const newFacts : Fact[] = [];
 
   const primTypeMap: Record<string, number> = {
     number: tNode.NUMBER,
@@ -1476,7 +1478,7 @@ function injectFeedback(feedbackPath: string) {
     const targetVarId = entry.id;
     const typeId = primTypeMap[entry.type];
     if (typeId === undefined) {
-      console.warn(`Feedback: unsupported type "${entry.type}" for id ${entry.id}`);
+      console.error(`Feedback: unsupported type "${entry.type}" for id ${entry.id}`);
       missedCount++;
       continue;
     }
@@ -1485,16 +1487,19 @@ function injectFeedback(feedbackPath: string) {
     const syntheticVarId = typeVarCounter++;
 
     // 分配原始类型到合成节点
-    emit.allocPrimitive(syntheticVarId, typeId);
+    newFacts.push({ kind: "AllocPrimitive", varId: syntheticVarId, typeId });
+    // emit.allocPrimitive(syntheticVarId, typeId);
     // 通过 flow 边将类型绑定到目标标识符（solver 通过 sameType 边传播）
-    emit.flow(syntheticVarId, targetVarId, "external feedback");
+    newFacts.push({ kind: "Flow", from: syntheticVarId, to: targetVarId, reason: "external feedback" });
+    // emit.flow(syntheticVarId, targetVarId, "external feedback");
     injectedCount++;
   }
 
   console.log(`Feedback injected: ${injectedCount} entries (${missedCount} missed)`);
+  return newFacts;
 }
 
-function main() {
+async function main() {
 
   const astFiles = getAstFiles(inputDir);
   for (const file of astFiles) {
@@ -1515,10 +1520,57 @@ function main() {
 
   // Optional: inject LLM-inferred types as feedback
   if (feedbackOption) {
-    injectFeedback(feedbackOption);
+    if (!fs.existsSync(feedbackOption)) {
+      console.warn(`Feedback file not found: ${feedbackOption}, skipping injection`);
+      return;
+    }
+  
+    const feedback: FeedbackEntry[] = JSON.parse(fs.readFileSync(feedbackOption, "utf8"));
+    for (let f of injectFeedback(feedback)) {
+      fact.add(f);
+    }
   }
 
   solver.solve(fact);
+  solver.output();
+
+  // Agent 模式：收集未知声明 → LLM 推断 → 回填 → 继续求解
+  if (agentMode) {
+    if (!agentApiKey) {
+      console.warn("Agent mode enabled but no API key set (use --api-key or DEEPSEEK_API_KEY). Skipping.");
+    } else {
+      const unkSpots = solver.getUnkInfo();
+      console.log(`[agent] 收集 ${unkSpots.length} 个未知声明节点`);
+
+      if (unkSpots.length > 0) {
+        // 推导源码目录
+        const sourceDir = sourcedirOption || (() => {
+          // 约定：input 是 ${dir}_erase_output，则源码在 ${dir}_erase
+          const last = path.basename(inputDir);
+          return last.endsWith("_output")
+            ? path.join(path.dirname(inputDir), last.replace(/_output$/, ""))
+            : inputDir;
+        })();
+
+        const feedback = await inferTypes(
+          unkSpots,
+          agentApiKey,
+          30,
+          (file, done, total) => {
+            if (done >= total) {
+              console.log(`[agent] ${file}: ${done}/${total}`);
+            }
+          }
+        );
+
+        if (feedback.length > 0) {
+          console.log(`[agent] LLM 推断 ${feedback.length} 条，回填并继续求解...`);
+          solver.injectFeedback(feedback);
+        }
+      }
+    }
+  }
+
   solver.output();
 }
 
@@ -1536,4 +1588,4 @@ function getAstFiles(dir: string): string[] {
 
 main();
 
-export {tNode, solver, outputDir, meta};
+export {tNode, solver, outputDir, meta, injectFeedback};

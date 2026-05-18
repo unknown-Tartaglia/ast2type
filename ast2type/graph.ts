@@ -312,26 +312,26 @@ export class TypeGraph {
             wrongEdges: [] as { kind: string, from: VarId, to: VarId, inferredType: string, expectedType: string }[],
         };
 
-        // 从output/inferinfo.json加载外部推导类型信息
-        const inferredTypes: Map<VarId, string> = new Map<VarId, string>();
-        try {
-            const inferInfoPath = path.join(outputDir, "inferinfo.json");
-            if (fs.existsSync(inferInfoPath)) {
-                const inferData = JSON.parse(fs.readFileSync(inferInfoPath, "utf-8"));
-                for (const item of inferData) {
-                    if (item.id === undefined || item.type === undefined) {
-                        console.warn(`Invalid infer info item: ${JSON.stringify(item)}, skipping`);
-                        continue;
-                    }
-                    inferredTypes.set(item.id, item.type);
-                }
-                console.log(`Loaded inferred types for ${inferredTypes.size} nodes from ${inferInfoPath}`);
-            } else {
-                console.warn(`Inferred types file not found at ${inferInfoPath}, skipping loading inferred types`);
-            }
-        } catch (err) {
-            console.error(`Error loading inferred types: ${err}`);
-        }
+        // // 从output/inferinfo.json加载外部推导类型信息
+        // const inferredTypes: Map<VarId, string> = new Map<VarId, string>();
+        // try {
+        //     const inferInfoPath = path.join(outputDir, "inferinfo.json");
+        //     if (fs.existsSync(inferInfoPath)) {
+        //         const inferData = JSON.parse(fs.readFileSync(inferInfoPath, "utf-8"));
+        //         for (const item of inferData) {
+        //             if (item.id === undefined || item.type === undefined) {
+        //                 console.warn(`Invalid infer info item: ${JSON.stringify(item)}, skipping`);
+        //                 continue;
+        //             }
+        //             inferredTypes.set(item.id, item.type);
+        //         }
+        //         console.log(`Loaded inferred types for ${inferredTypes.size} nodes from ${inferInfoPath}`);
+        //     } else {
+        //         console.warn(`Inferred types file not found at ${inferInfoPath}, skipping loading inferred types`);
+        //     }
+        // } catch (err) {
+        //     console.error(`Error loading inferred types: ${err}`);
+        // }
 
         // 遍历所有边
         for (const [_, edgeSet] of this.toEdges) {
@@ -371,23 +371,23 @@ export class TypeGraph {
                 if (edge.type === "returnAnnotation") inferredState = fromState ? fromState.getReturnType() : null;
 
                 if (!inferredState) {
-                    if (inferredTypes.has(edge.from)) {
-                        const inferredTypeStr = inferredTypes.get(edge.from)!;
-                        switch (inferredTypeStr) {
-                            case "number":
-                                inferredState = new DeterminantNodeState(tNode.NUMBER);
-                                break;
-                            case "string":
-                                inferredState = new DeterminantNodeState(tNode.STRING);
-                                break;
-                            case "boolean":
-                                inferredState = new DeterminantNodeState(tNode.BOOLEAN);
-                                break;
-                            default:
-                                console.warn(`Unrecognized inferred type string "${inferredTypeStr}" for node ${edge.from}, treating as unknown`);
-                                inferredState = new DeterminantNodeState(tNode.UNKNOWN);
-                        }
-                    } else {
+                    // if (inferredTypes.has(edge.from)) {
+                    //     const inferredTypeStr = inferredTypes.get(edge.from)!;
+                    //     switch (inferredTypeStr) {
+                    //         case "number":
+                    //             inferredState = new DeterminantNodeState(tNode.NUMBER);
+                    //             break;
+                    //         case "string":
+                    //             inferredState = new DeterminantNodeState(tNode.STRING);
+                    //             break;
+                    //         case "boolean":
+                    //             inferredState = new DeterminantNodeState(tNode.BOOLEAN);
+                    //             break;
+                    //         default:
+                    //             console.warn(`Unrecognized inferred type string "${inferredTypeStr}" for node ${edge.from}, treating as unknown`);
+                    //             inferredState = new DeterminantNodeState(tNode.UNKNOWN);
+                    //     }
+                    // } else {
                         // 没有推导类型信息，视为缺失
                         result.missing++;
                         result.wrongEdges.push({
@@ -398,7 +398,7 @@ export class TypeGraph {
                             expectedType: expectedTypeStr
                         });
                         continue;
-                    }
+                    // }
                 }
 
                 const inferredTypeStr = inferredState.toString();
