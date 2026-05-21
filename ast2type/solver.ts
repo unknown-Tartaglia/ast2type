@@ -180,7 +180,7 @@ export class Solver {
         }
     }
 
-    output(): any {
+    output(eva = true): any {
         fs.mkdirSync(outputDir, { recursive: true });
 
         // 写出类型图（仅 JSON）
@@ -210,9 +210,11 @@ export class Solver {
         }
 
         // 评估标注
-        const evalResult = this.graph.evaluate();
-        const evalOut = path.join(outputDir, "evaluation.json");
-        writeJsonStream(evalOut, evalResult);
+        if (eva) {
+            const evalResult = this.graph.evaluate();
+            const evalOut = path.join(outputDir, "evaluation.json");
+            writeJsonStream(evalOut, evalResult);
+        }
 
         console.log(`Done. Output written to ${outputDir}`);
     }

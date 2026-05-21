@@ -1532,7 +1532,7 @@ async function main() {
   }
 
   solver.solve(fact);
-  solver.output();
+  solver.output(false);
 
   // Agent 模式：收集未知声明 → LLM 推断 → 回填 → 继续求解
   if (agentMode) {

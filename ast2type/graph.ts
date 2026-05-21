@@ -310,6 +310,7 @@ export class TypeGraph {
             unknown: 0, // 统计无法判断类型的注释出现次数
             rightEdges: [] as { kind: string, from: VarId, to: VarId, inferredType: string, expectedType: string }[],
             wrongEdges: [] as { kind: string, from: VarId, to: VarId, inferredType: string, expectedType: string }[],
+            undeterminedEdges: [] as { kind: string, from: VarId, to: VarId, inferredType: string, expectedType: string }[],
         };
 
         // // 从output/inferinfo.json加载外部推导类型信息
@@ -371,34 +372,16 @@ export class TypeGraph {
                 if (edge.type === "returnAnnotation") inferredState = fromState ? fromState.getReturnType() : null;
 
                 if (!inferredState) {
-                    // if (inferredTypes.has(edge.from)) {
-                    //     const inferredTypeStr = inferredTypes.get(edge.from)!;
-                    //     switch (inferredTypeStr) {
-                    //         case "number":
-                    //             inferredState = new DeterminantNodeState(tNode.NUMBER);
-                    //             break;
-                    //         case "string":
-                    //             inferredState = new DeterminantNodeState(tNode.STRING);
-                    //             break;
-                    //         case "boolean":
-                    //             inferredState = new DeterminantNodeState(tNode.BOOLEAN);
-                    //             break;
-                    //         default:
-                    //             console.warn(`Unrecognized inferred type string "${inferredTypeStr}" for node ${edge.from}, treating as unknown`);
-                    //             inferredState = new DeterminantNodeState(tNode.UNKNOWN);
-                    //     }
-                    // } else {
-                        // 没有推导类型信息，视为缺失
-                        result.missing++;
-                        result.wrongEdges.push({
-                            kind: edge.type,
-                            from: edge.from,
-                            to: edge.to,
-                            inferredType: "unknown",
-                            expectedType: expectedTypeStr
-                        });
-                        continue;
-                    // }
+                    // 没有推导类型信息，视为缺失
+                    result.missing++;
+                    result.undeterminedEdges.push({
+                        kind: edge.type,
+                        from: edge.from,
+                        to: edge.to,
+                        inferredType: "missing",
+                        expectedType: expectedTypeStr
+                    });
+                    continue;
                 }
 
                 const inferredTypeStr = inferredState.toString();
@@ -407,7 +390,7 @@ export class TypeGraph {
                 // 检查推导类型是否为unknown
                 if (inferredTypeId === tNode.UNKNOWN) {
                     result.missing++;
-                    result.wrongEdges.push({
+                    result.undeterminedEdges.push({
                         kind: edge.type,
                         from: edge.from,
                         to: edge.to,
@@ -500,19 +483,6 @@ export class TypeGraph {
         if (result.wrongEdges.length > 0) {
             console.log("\n--- Type mismatches ---");
             for (const w of result.wrongEdges) {
-                // 跳过推导类型为unknown的（这些已经在missing中）
-                if (w.inferredType === "unknown") continue;
-                const fromText = meta.text.get(w.from) || `var_${w.from}`;
-                const toText = meta.text.get(w.to) || `var_${w.to}`;
-                console.log(
-                    `  [${w.kind}] ${fromText}[${w.from}] (${w.inferredType})  !==  ${toText} (${w.expectedType})`
-                );
-            }
-
-            console.log("\n--- Type underived ---");
-            for (const w of result.wrongEdges) {
-                // 只显示推导类型为unknown的
-                if (w.inferredType !== "unknown") continue;
                 const fromText = meta.text.get(w.from) || `var_${w.from}`;
                 const toText = meta.text.get(w.to) || `var_${w.to}`;
                 console.log(
