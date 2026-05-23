@@ -1423,19 +1423,10 @@ function injectGroundTruth(groundtruthPath: string) {
         continue;
       }
 
-      // Map type string to primitive TypeId
-      const primTypeMap: Record<string, number> = {
-        number: tNode.NUMBER,
-        string: tNode.STRING,
-        boolean: tNode.BOOLEAN,
-        void: tNode.VOID,
-        any: tNode.ANY,
-        undefined: tNode.UNDEFINED,
-      };
-
-      const typeId = primTypeMap[ann.type];
-      if (typeId === undefined) {
-        console.error(`Ground truth: unsupported type "${ann.type}" for "${ann.identifier}"`);
+      // Parse type string to TypeId (supports primitives, arrays, unions, literals, named types, etc.)
+      const typeId = tNode.parseTypeString(ann.type);
+      if (typeId === null) {
+        console.error(`Ground truth: could not parse type "${ann.type}" for "${ann.identifier}"`);
         missedCount++;
         continue;
       }
@@ -1465,20 +1456,11 @@ function injectFeedback(feedback: FeedbackEntry[]) {
   let missedCount = 0;
   const newFacts : Fact[] = [];
 
-  const primTypeMap: Record<string, number> = {
-    number: tNode.NUMBER,
-    string: tNode.STRING,
-    boolean: tNode.BOOLEAN,
-    void: tNode.VOID,
-    any: tNode.ANY,
-    undefined: tNode.UNDEFINED,
-  };
-
   for (const entry of feedback) {
     const targetVarId = entry.id;
-    const typeId = primTypeMap[entry.type];
-    if (typeId === undefined) {
-      console.error(`Feedback: unsupported type "${entry.type}" for id ${entry.id}`);
+    const typeId = tNode.parseTypeString(entry.type);
+    if (typeId === null) {
+      console.error(`Feedback: could not parse type "${entry.type}" for id ${entry.id}`);
       missedCount++;
       continue;
     }

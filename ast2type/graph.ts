@@ -411,7 +411,7 @@ export class TypeGraph {
                 else if (inferredTypeId === tNode.ANY) {
                     isCompatible = true;
                 }
-                // 3. 字面量到原始类型的赋值
+                // 3. 复杂类型比较
                 else {
                     const inferredType = tNode.get(inferredTypeId);
                     const expectedType = tNode.get(expectedTypeId);
@@ -434,6 +434,32 @@ export class TypeGraph {
                             const infElem = new DeterminantNodeState(inferredType.elementType);
                             const expElem = new DeterminantNodeState(expectedType.elementType);
                             if (infElem.equals(expElem)) {
+                                isCompatible = true;
+                            }
+                        }
+                        // union 成员匹配：inferred 匹配 union 中任一成员
+                        else if (expectedType.kind === "union") {
+                            for (const memberId of expectedType.types) {
+                                if (inferredTypeId === memberId || memberId === tNode.ANY) {
+                                    isCompatible = true;
+                                    break;
+                                }
+                                // 递归检查字面量→基元
+                                const memType = tNode.get(memberId);
+                                if (memType?.kind === "primitive" && inferredType.kind === "literal") {
+                                    if ((typeof inferredType.value === "number" && memType.name === "number") ||
+                                        (typeof inferredType.value === "string" && memType.name === "string") ||
+                                        (typeof inferredType.value === "boolean" && memType.name === "boolean")) {
+                                        isCompatible = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        // object-by-name: 同名类型视为兼容
+                        else if (inferredType.kind === "object" && expectedType.kind === "object") {
+                            if (inferredType.name && expectedType.name &&
+                                inferredType.name === expectedType.name) {
                                 isCompatible = true;
                             }
                         }

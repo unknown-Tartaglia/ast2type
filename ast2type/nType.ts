@@ -13,6 +13,7 @@ export class tNodeStore {
     BOOLEAN = 4;
     UNDEFINED = 5;
     VOID = 6;
+    private _synthObjId = 100000;
 
     constructor() {
         // 预定义一些基础类型
@@ -373,6 +374,104 @@ export class tNodeStore {
           default:
             return "unknown"
         }
+    }
+
+    /** 将 ground truth 类型字符串解析为 TypeId */
+    parseTypeString(raw: string): TypeId | null {
+        const s = raw.trim();
+        if (!s) return null;
+
+        // 1. 基础类型
+        const primMap: Record<string, number> = {
+            number: this.NUMBER, string: this.STRING, boolean: this.BOOLEAN,
+            void: this.VOID, any: this.ANY, undefined: this.UNDEFINED,
+            unknown: this.UNKNOWN, null: this.UNDEFINED,
+        };
+        if (primMap[s] !== undefined) return primMap[s];
+
+        // 2. 字面量
+        if (/^["'].*["']$/.test(s)) {
+            return this.newTypeNode({ kind: "literal", value: s.slice(1, -1) });
+        }
+        if (/^-?\d+(\.\d+)?$/.test(s)) {
+            return this.newTypeNode({ kind: "literal", value: Number(s) });
+        }
+        if (s === "true") return this.newTypeNode({ kind: "literal", value: true });
+        if (s === "false") return this.newTypeNode({ kind: "literal", value: false });
+
+        // 3. 数组: T[]
+        if (s.endsWith("[]")) {
+            const elem = this.parseTypeString(s.slice(0, -2));
+            if (elem === null) return null;
+            return this.newTypeNode({ kind: "array", elementType: elem });
+        }
+
+        // 4. 函数: (...) => T
+        const funcMatch = s.match(/^\(([\s\S]*)\)\s*=>\s*(.+)$/);
+        if (funcMatch) {
+            const paramsStr = funcMatch[1].trim();
+            const retType = this.parseTypeString(funcMatch[2].trim());
+            if (retType === null) return null;
+            const paramEntries: Record<number, { id: number; type: number }> = {};
+            if (paramsStr) {
+                const parts = this._splitTopLevel(paramsStr, ",");
+                for (let i = 0; i < parts.length; i++) {
+                    const p = parts[i].trim();
+                    const colonIdx = p.indexOf(":");
+                    const paramTypeId = colonIdx >= 0
+                        ? (this.parseTypeString(p.slice(colonIdx + 1).trim()) ?? this.ANY)
+                        : (this.parseTypeString(p) ?? this.ANY);
+                    paramEntries[i] = { id: -(++this._synthObjId), type: paramTypeId };
+                }
+            }
+            return this.newTypeNode({
+                kind: "function", name: "", id: ++this._synthObjId,
+                param: paramEntries, returnType: retType,
+            });
+        }
+
+        // 5. 联合: A | B (顶层)
+        const unionParts = this._splitTopLevel(s, "|");
+        if (unionParts.length > 1) {
+            const types = unionParts
+                .map(p => this.parseTypeString(p.trim()))
+                .filter((t): t is number => t !== null);
+            if (types.length === 0) return null;
+            if (types.length === 1) return types[0];
+            return this.newTypeNode({ kind: "union", types });
+        }
+
+        // 6. 泛型: Name<T> — 只取名字,参数不深入
+        const genMatch = s.match(/^(.+?)<.+>$/);
+        if (genMatch) {
+            return this.newTypeNode({
+                kind: "object", name: genMatch[1].trim(),
+                id: ++this._synthObjId, properties: {},
+            });
+        }
+
+        // 7. 命名类型 — 当作 object
+        return this.newTypeNode({
+            kind: "object", name: s, id: ++this._synthObjId, properties: {},
+        });
+    }
+
+    /** 按分隔符分割，忽略括号/尖括号内的分隔符 */
+    private _splitTopLevel(s: string, sep: string): string[] {
+        const parts: string[] = [];
+        let depth = 0, start = 0;
+        for (let i = 0; i < s.length; i++) {
+            const ch = s[i];
+            if (ch === "(" || ch === "<" || ch === "{") depth++;
+            else if (ch === ")" || ch === ">" || ch === "}") depth--;
+            else if (depth === 0 && s.slice(i, i + sep.length) === sep) {
+                parts.push(s.slice(start, i));
+                start = i + sep.length;
+                if (sep.length > 1) i += sep.length - 1;
+            }
+        }
+        parts.push(s.slice(start));
+        return parts;
     }
 }
 

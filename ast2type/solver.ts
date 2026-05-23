@@ -85,15 +85,6 @@ export class Solver {
 
     /** 将 LLM 推断的类型注入为 Fact 并继续求解（增量，不清空已求结果） */
     injectFeedback(feedback: Array<{ id: number; type: string }>) {
-        const primTypeMap: Record<string, number> = {
-            number: tNode.NUMBER,
-            string: tNode.STRING,
-            boolean: tNode.BOOLEAN,
-            void: tNode.VOID,
-            any: tNode.ANY,
-            undefined: tNode.UNDEFINED,
-        };
-
         const newFacts: Fact[] = injectFeedback(feedback);
 
         if (newFacts.length === 0) return;
