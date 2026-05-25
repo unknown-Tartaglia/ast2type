@@ -10,13 +10,25 @@
  *   NO_PROXY_TLS - 设为 1 跳过 TLS 证书校验
  */
 
-import { ProxyAgent, setGlobalDispatcher } from "undici";
-
 let _setup = false;
 
-export function setupProxy(proxyUrl?: string) {
+export async function setupProxy(proxyUrl?: string) {
   if (_setup) return;
   _setup = true;
+
+  if (typeof globalThis.File === "undefined") {
+    (globalThis as any).File = class File extends Blob {
+      name: string;
+      lastModified: number;
+      constructor(bits: any[], name: string, opts?: any) {
+        super(bits, opts);
+        this.name = name;
+        this.lastModified = opts?.lastModified ?? Date.now();
+      }
+    } as any;
+  }
+
+  const { ProxyAgent, setGlobalDispatcher } = await import("undici");
 
   const uri = proxyUrl || process.env.HTTP_PROXY || "http://127.0.0.1:10805";
   const rejectUnauthorized = process.env.NO_PROXY_TLS !== "1";
@@ -31,7 +43,7 @@ export async function fetchWithProxy(
   url: string,
   init?: RequestInit
 ): Promise<Response> {
-  setupProxy();
+  await setupProxy();
   return fetch(url, init);
 }
 
@@ -45,7 +57,7 @@ export async function chat(
     tools?: Array<Record<string, unknown>>;
   }
 ): Promise<any> {
-  setupProxy();
+  await setupProxy();
 
   const baseUrl = opts.baseUrl || "https://api.deepseek.com/v1";
   const model = opts.model || "deepseek-chat";

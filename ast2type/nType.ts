@@ -381,6 +381,9 @@ export class tNodeStore {
         const s = raw.trim();
         if (!s) return null;
 
+        // 空元组类型 [] → unknown[]
+        if (s === "[]") return this.newTypeNode({ kind: "array", elementType: this.UNKNOWN });
+
         // 1. 基础类型
         const primMap: Record<string, number> = {
             number: this.NUMBER, string: this.STRING, boolean: this.BOOLEAN,
@@ -399,7 +402,12 @@ export class tNodeStore {
         if (s === "true") return this.newTypeNode({ kind: "literal", value: true });
         if (s === "false") return this.newTypeNode({ kind: "literal", value: false });
 
-        // 3. 数组: T[]
+        // 3. typeof X → 在 JS 擦除后等价于 X 本身
+        if (s.startsWith("typeof ")) {
+            return this.parseTypeString(s.slice(7).trim());
+        }
+
+        // 4. 数组: T[]
         if (s.endsWith("[]")) {
             const elem = this.parseTypeString(s.slice(0, -2));
             if (elem === null) return null;
@@ -551,21 +559,22 @@ export class DeterminantNodeState implements NodeState {
     }
 
     addElement(ns: NodeState): boolean {
-        const typeNode = tNode.get(this.val);
-        if (!typeNode) {
+        const oldTypeNode = tNode.get(this.val);
+        if (!oldTypeNode) {
             console.warn(`Trying to add element to undefined typeid: ${this.val}`);
             return false;
         }
-        if (typeNode.kind !== "array") {
+        if (oldTypeNode.kind !== "array") {
             console.warn(`Trying to add element to non-array type: ${tNode.printFullType(this.val)}`);
             return false;
         }
-        if (typeNode.elementType === ns.val) {
+        if (oldTypeNode.elementType === ns.val) {
             // 元素类型已相同，无需修改
             return false;
         }
-        typeNode.elementType = tNode.merge([typeNode.elementType, ns.val]);
-        this.val = tNode.newTypeNode(typeNode); // 重新注册类型节点
+        // 不修改共享的 oldTypeNode，创建全新 array 类型
+        const newElementType = tNode.merge([oldTypeNode.elementType, ns.val]);
+        this.val = tNode.newTypeNode({ kind: "array", elementType: newElementType });
         return true;
     }
 

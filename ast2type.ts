@@ -7,8 +7,7 @@ import { Solver } from "./ast2type/solver";
 import { tNodeStore } from "./ast2type/nType";
 import { DeterminantStrategy } from "./ast2type/strategy";
 import { RuleStore } from "./ast2type/rule";
-import { inferTypes } from "./agent/infer";
-import { Graph } from "@langchain/core/runnables/graph";
+
 
 // 命令行参数解析
 const program = new Command();
@@ -19,7 +18,8 @@ program
   .option("-f, --feedback <path>", "Path to feedback JSON for type injection (LLM-inferred types)")
   .option("--agent", "Enable LLM agent to infer unknown declaration types in-loop")
   .option("--sourcedir <dir>", "Erased source directory for agent (auto-derived if omitted)")
-  .option("--api-key <key>", "API key for agent (or set DEEPSEEK_API_KEY env var)");
+  .option("--api-key <key>", "API key for agent (or set DEEPSEEK_API_KEY env var)")
+  .option("--trace <varId>", "Trace type changes for a specific varId, output to trace.json");
 program.parse(process.argv);
 
 const options = program.opts();
@@ -30,6 +30,7 @@ const feedbackOption: string | undefined = options.feedback ? path.resolve(optio
 const agentMode: boolean = !!options.agent;
 const agentApiKey: string = options.apiKey || process.env.DEEPSEEK_API_KEY || "";
 const sourcedirOption: string | undefined = options.sourcedir ? path.resolve(options.sourcedir) : undefined;
+const traceTarget: number | null = options.trace ? parseInt(options.trace, 10) : null;
 
 const LOG_SCOPE = false; // 是否开启日志作用域
 export const LOG_TYPENODE = false; // 是否开启类型节点日志
@@ -362,13 +363,15 @@ function secondPass(filePath: string, node: AstNode) {
     },
     TypeAliasDeclaration(node) {
       const left = node.children?.find(n => n.kind === "Identifier");
-      const right = node.children?.find(n => n.kind === "TypeReference");
-      if (!left || !right || !left.varId || !right.varId) return;
+      if (!left || !left.varId) return;
       if (LOG_IDENTIFIER_NODE)
-        console.log(`Variable ${left.text} has ID ${left.varId}`);
+        console.log(`TypeAlias ${left.text} has ID ${left.varId}`);
       varBindings.set(left.text!, left.varId);
 
-      emit.alias(right.varId!, left.varId!);
+      const right = node.children?.find(n => n.kind === "TypeReference");
+      if (right && right.varId) {
+        emit.alias(right.varId!, left.varId!);
+      }
 
       //处理namespace
       let paNode = node.parent?.parent?.parent;
@@ -471,7 +474,7 @@ function secondPass(filePath: string, node: AstNode) {
     PropertySignature(node) {
       if (node.children && node.children.length >= 2) {
         let idNode = node.parent;
-        while (idNode && idNode.kind !== "InterfaceDeclaration") idNode = idNode.parent;
+        while (idNode && idNode.kind !== "InterfaceDeclaration" && idNode.kind !== "TypeAliasDeclaration") idNode = idNode.parent;
         idNode = idNode?.children?.find(n => n.kind === "Identifier");
         if (!idNode || idNode.varId === undefined) return;
 
@@ -499,7 +502,7 @@ function secondPass(filePath: string, node: AstNode) {
     MethodSignature(node) {
       if (node.children && node.children.length >= 2) {
         let idNode = node.parent;
-        while (idNode && idNode.kind !== "InterfaceDeclaration") idNode = idNode.parent;
+        while (idNode && idNode.kind !== "InterfaceDeclaration" && idNode.kind !== "TypeAliasDeclaration") idNode = idNode.parent;
         idNode = idNode?.children?.find(n => n.kind === "Identifier");
         if (!idNode || idNode.varId === undefined) return;
 
@@ -558,7 +561,7 @@ function secondPass(filePath: string, node: AstNode) {
         if (propIdNode.text) {
           meta.propName.set(propIdNode.varId!, propIdNode.text);
           varBindings.set(propIdNode.text, propIdNode.varId!);
-          console.log(`PropertyDeclaration: ${idNode.text!}.${propIdNode.text!}(${propIdNode.varId})`);        console.log(`PropertyDeclaration: ${idNode.text!}.${propIdNode.text!}(${propIdNode.varId})`);
+          // console.log(`PropertyDeclaration: ${idNode.text!}.${propIdNode.text!}(${propIdNode.varId})`);
         }
         emit.prop(idNode.varId, propIdNode.varId);
         
@@ -632,7 +635,7 @@ function secondPass(filePath: string, node: AstNode) {
         idNode = idNode?.kind === "ObjectLiteralExpression" ? idNode : idNode?.children?.find(n => n.kind === "Identifier");
         if (!idNode || idNode.varId === undefined) return;
 
-        console.log(node.text);
+        // console.log(node.text);
         constructors[idNode.varId] = node?.varId!;
         emit.allocFunction(node.varId!, node.varId!);
         meta.propName.set(node.varId!, "constructor");
@@ -1111,7 +1114,7 @@ function secondPass(filePath: string, node: AstNode) {
           return;
         }
         const typeId = paramBindings.get(node.text) ?? varBindings.get(node.text);
-        if (node.text === "x") console.log(`Identifier x at line ${node.position?.start?.line}, column ${node.position?.start?.character} in ${filePath} has varId ${node.varId} and typeId ${typeId}`);
+        // if (node.text === "x") console.log(`Identifier x at line ${node.position?.start?.line}, column ${node.position?.start?.character} in ${filePath} has varId ${node.varId} and typeId ${typeId}`);
 
         if (typeId !== undefined) {
           if ((node.parent?.kind === "PropertyAssignment") && node.parent?.children?.[2] === node) {
@@ -1418,7 +1421,6 @@ function injectGroundTruth(groundtruthPath: string) {
       }
 
       if (targetVarId === undefined) {
-        console.error(`Ground truth: could not find varId for "${ann.identifier}" at offset ${ann.offset} in ${filePath}`);
         missedCount++;
         continue;
       }
@@ -1441,7 +1443,7 @@ function injectGroundTruth(groundtruthPath: string) {
       } else {
         emit.annot(targetVarId, syntheticVarId);
       }
-      console.log(`Injected ground truth for "${ann.identifier}" at offset ${ann.offset} in ${filePath} with type "${ann.type}" (varId ${targetVarId})`);
+      // console.log(`Injected ground truth for "${ann.identifier}" at offset ${ann.offset} in ${filePath} with type "${ann.type}" (varId ${targetVarId})`);
       injectedCount++;
     }
   }
@@ -1513,6 +1515,11 @@ async function main() {
     }
   }
 
+  if (traceTarget !== null) {
+    solver.graph.traceTarget = traceTarget;
+    console.log(`[trace] tracing varId ${traceTarget}`);
+  }
+
   solver.solve(fact);
   solver.output(false);
 
@@ -1534,6 +1541,7 @@ async function main() {
             : inputDir;
         })();
 
+        const { inferTypes } = await import("./agent/infer");
         const feedback = await inferTypes(
           unkSpots,
           agentApiKey,
@@ -1554,6 +1562,7 @@ async function main() {
   }
 
   solver.output();
+  solver.graph.dumpTrace(outputDir);
 }
 
 // // 递归获取所有 AST 文件

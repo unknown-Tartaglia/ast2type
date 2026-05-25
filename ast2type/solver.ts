@@ -116,10 +116,15 @@ export class Solver {
                 break;
             }
             const nodeId = this.worklist.shift()!;
+            this.graph.traceEvent("propagate:before", nodeId);
             let wl = this.strategy.propagate(nodeId, this.graph);
             this.worklist.push(...wl);
+            this.graph.traceAffected("propagate:affected", nodeId, wl);
+            this.graph.traceEvent("propagate:after", nodeId);
             wl = this.graph.extend(nodeId);
             this.worklist.push(...wl);
+            this.graph.traceAffected("extend:affected", nodeId, wl);
+            this.graph.traceEvent("extend:after", nodeId);
         }
     }
 
@@ -160,11 +165,16 @@ export class Solver {
                 break;
             }
             const nodeId = this.worklist.shift()!;
+            this.graph.traceEvent("propagate:before", nodeId);
             let worklist;
             worklist = this.strategy.propagate(nodeId, this.graph);
             this.worklist.push(...worklist);
+            this.graph.traceAffected("propagate:affected", nodeId, worklist);
+            this.graph.traceEvent("propagate:after", nodeId);
             worklist = this.graph.extend(nodeId);
             this.worklist.push(...worklist);
+            this.graph.traceAffected("extend:affected", nodeId, worklist);
+            this.graph.traceEvent("extend:after", nodeId);
         }
         if (iteration > maxIterations) {
             console.error("Solver terminated due to possible infinite loop");

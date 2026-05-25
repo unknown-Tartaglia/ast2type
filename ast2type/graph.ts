@@ -1,5 +1,5 @@
 import { meta, outputDir, solver, tNode } from "../ast2type";
-import { VarId } from "./fact"
+import { VarId, TypeId } from "./fact"
 import { NodeState, tNodeStore, DeterminantNodeState } from "./nType";
 import * as path from "path";
 import * as fs from "fs";
@@ -10,6 +10,10 @@ export class TypeGraph {
     toEdges = new Map<VarId, Set<Edge>>()
     fromEdges = new Map<VarId, Set<Edge>>()
     delayEdges = new Map<VarId, { from: VarId, argIdx: number, edgeType: string }[]>()
+    // trace
+    traceTarget: number | null = null
+    private traceLog: any[] = []
+    private traceStep = 0
 
 
     addEdge(from: VarId, to: VarId, type: string) {
@@ -23,7 +27,22 @@ export class TypeGraph {
         if (!this.fromEdges.has(to)) {
             this.fromEdges.set(to, new Set<Edge>());
         }
-        this.fromEdges.get(to)!.add(edge);  
+        this.fromEdges.get(to)!.add(edge);
+
+        // trace: 新边指向追踪目标
+        if (to === this.traceTarget) {
+            this.traceStep++;
+            const ownType = this.nodes.get(to);
+            const fromType = this.nodes.get(from);
+            this.traceLog.push({
+                step: this.traceStep,
+                action: "addEdge",
+                from,
+                edgeType: type,
+                fromType: fromType?.toString() ?? "unknown",
+                ownType: ownType?.toString() ?? "unknown",
+            });
+        }
     }
 
     addDelayedEdge(from: VarId, toFuncVarId: VarId, argIdx: number, edgeType: string) {
@@ -78,6 +97,17 @@ export class TypeGraph {
         this.nodes.set(node, val);
         this.state2node.set(val, (this.state2node.get(val) || new Set<VarId>()).add(node));
 
+        // trace
+        if (node === this.traceTarget) {
+            this.traceStep++;
+            this.traceLog.push({
+                step: this.traceStep,
+                action: "setType",
+                ownType: val.toString(),
+                sources: this._traceSources(node),
+            });
+        }
+
         if (!this.delayEdges.has(node)) return;
         const funcNode = val.getFuncVaridorNull();
         if (funcNode === null) return;
@@ -93,7 +123,7 @@ export class TypeGraph {
                 }
                 this.addEdge(from, paramVarId, edgeType);
                 solver.worklist.push(from);
-                console.log(`Added delayed edge from ${from} to ${paramVarId} for argument index ${argIdx} with edge type ${edgeType}`);
+                // console.log(`Added delayed edge from ${from} to ${paramVarId} for argument index ${argIdx} with edge type ${edgeType}`);
             } else {
                 console.error(`ArgRule: funcVarId ${funcNode} does not have paramMap, cannot add delayed edge from ${from} for argument index ${argIdx} with edge type ${edgeType}`);
             }
@@ -106,6 +136,57 @@ export class TypeGraph {
         oldState?.addReturnType(new DeterminantNodeState(typeId));
     }
 
+    private _traceSources(node: VarId) {
+        const sources: any[] = [];
+        for (const edge of this.getFromEdges(node)) {
+            const fromType = this.nodes.get(edge.from);
+            sources.push({
+                from: edge.from,
+                edgeType: edge.type,
+                fromType: fromType?.toString() ?? "unknown",
+                cand: edge.cand?.toString() ?? null,
+            });
+        }
+        return sources;
+    }
+
+    /** 记录 trace 事件（propagate/extend 等不经过 setType 的步骤） */
+    traceEvent(action: string, node: VarId) {
+        if (node !== this.traceTarget) return;
+        const ownType = this.nodes.get(node);
+        this.traceStep++;
+        this.traceLog.push({
+            step: this.traceStep,
+            action,
+            ownType: ownType?.toString() ?? "unknown",
+            sources: this._traceSources(node),
+        });
+    }
+
+    /** 记录 propagate/extend 影响了哪些节点的类型变化 */
+    traceAffected(action: string, targetNode: VarId, affected: VarId[]) {
+        if (targetNode !== this.traceTarget || affected.length === 0) return;
+        const details = affected.map(id => {
+            const t = this.nodes.get(id);
+            return { id, type: t?.toString() ?? "unknown" };
+        });
+        this.traceStep++;
+        this.traceLog.push({
+            step: this.traceStep,
+            action,
+            targetNode,
+            affected: details,
+        });
+    }
+
+    /** 输出 trace 日志到文件 */
+    dumpTrace(dir: string) {
+        if (!this.traceTarget || this.traceLog.length === 0) return;
+        const out = path.join(dir, "trace.json");
+        fs.writeFileSync(out, JSON.stringify(this.traceLog, null, 2), "utf-8");
+        console.log(`[trace] ${this.traceLog.length} events for varId ${this.traceTarget} → ${out}`);
+    }
+
     getToEdges(node: VarId): Set<Edge> {
         return this.toEdges.get(node) || new Set<Edge>();
     }
@@ -116,6 +197,19 @@ export class TypeGraph {
 
     setSrcType(edge: Edge, val: NodeState) {
         edge.cand = val;
+        if (edge.to === this.traceTarget) {
+            this.traceStep++;
+            const ownType = this.nodes.get(edge.to);
+            this.traceLog.push({
+                step: this.traceStep,
+                action: "setSrcType",
+                from: edge.from,
+                edgeType: edge.type,
+                candType: val.toString(),
+                ownType: ownType?.toString() ?? "unknown",
+                sources: this._traceSources(edge.to),
+            });
+        }
     }
 
     // 扩展节点，例如添加属性边等
@@ -127,27 +221,40 @@ export class TypeGraph {
             if (edge.type === "property") {
                 const fromType = this.nodes.get(edge.from);
                 if (!fromType) continue;
-                fromType.addProperty(meta.propName.get(nodeId)!, ty);
+                const changed = fromType.addProperty(meta.propName.get(nodeId)!, ty);
+                if (changed) {
+                    this.setType(edge.from, fromType);
+                    worklist.push(edge.from);
+                }
             }
             if (edge.type === "ArrayElement") {
                 const fromType = this.nodes.get(edge.from);
                 if (!fromType) continue;
                 const changed = fromType.addElement(ty);
-                if (changed) worklist.push(edge.from);
+                if (changed) {
+                    this.setType(edge.from, fromType);
+                    worklist.push(edge.from);
+                }
             }
             // 处理参数边：从函数指向参数，当前节点是参数
             if (edge.type === "param") {
                 const fromType = this.nodes.get(edge.from);
                 if (!fromType) continue;
                 const changed = fromType.addParam(nodeId, ty);
-                if (changed) worklist.push(edge.from);
+                if (changed) {
+                    this.setType(edge.from, fromType);
+                    worklist.push(edge.from);
+                }
             }
             // 处理返回边：从函数指向返回值，当前节点是返回值
             if (edge.type === "return") {
                 const fromType = this.nodes.get(edge.from);
                 if (!fromType) continue;
                 const changed = fromType.addReturnType(ty);
-                if (changed) worklist.push(edge.from);
+                if (changed) {
+                    this.setType(edge.from, fromType);
+                    worklist.push(edge.from);
+                }
             }
             // 处理枚举成员边：从enum指向member，当前节点是member
             if (edge.type === "enumMember") {
@@ -297,6 +404,58 @@ export class TypeGraph {
         return [outJson, unkJson];
     }
 
+    /** 递归判断两个 TypeId 是否兼容 */
+    private _typesCompatible(inferredId: TypeId, expectedId: TypeId): boolean {
+        // 严格相等
+        if (inferredId === expectedId) return true;
+        // any / unknown 与任何类型兼容
+        if (inferredId === tNode.ANY || expectedId === tNode.ANY) return true;
+        if (inferredId === tNode.UNKNOWN || expectedId === tNode.UNKNOWN) return true;
+
+        const inf = tNode.get(inferredId);
+        const exp = tNode.get(expectedId);
+        if (!inf || !exp) return false;
+
+        // 字面量 → 原始类型
+        if (inf.kind === "literal" && exp.kind === "primitive") {
+            return (typeof inf.value === "number" && exp.name === "number") ||
+                   (typeof inf.value === "string" && exp.name === "string") ||
+                   (typeof inf.value === "boolean" && exp.name === "boolean");
+        }
+
+        // 推导类型是 union → 任一成员与期望兼容即可（推导偏宽算正确）
+        if (inf.kind === "union") {
+            return inf.types.some(t => this._typesCompatible(t, expectedId));
+        }
+
+        // 期望类型是 union → 推导与任一成员兼容即可
+        if (exp.kind === "union") {
+            return exp.types.some(t => this._typesCompatible(inferredId, t));
+        }
+
+        // 数组兼容
+        if (inf.kind === "array" && exp.kind === "array") {
+            return this._typesCompatible(inf.elementType, exp.elementType);
+        }
+
+        // 推导是数组，期望是命名对象 Array → 兼容
+        if (inf.kind === "array" && exp.kind === "object" && exp.name === "Array") {
+            return true;
+        }
+
+        // 函数兼容：比较返回类型
+        if (inf.kind === "function" && exp.kind === "function") {
+            return this._typesCompatible(inf.returnType, exp.returnType);
+        }
+
+        // 同名 object
+        if (inf.kind === "object" && exp.kind === "object") {
+            if (inf.name && exp.name && inf.name === exp.name) return true;
+        }
+
+        return false;
+    }
+
     evaluate() {
         // 评估标注的准确性，基于annotation节点和returnAnnotation节点
         console.log("========== Evaluating type annotation consistency ==========");
@@ -401,70 +560,7 @@ export class TypeGraph {
                 }
 
                 // === 类型兼容性检查 ===
-                let isCompatible = false;
-
-                // 1. 严格相等
-                if (inferredState.equals(toState)) {
-                    isCompatible = true;
-                }
-                // 2. any可以赋值给任何类型
-                else if (inferredTypeId === tNode.ANY) {
-                    isCompatible = true;
-                }
-                // 3. 复杂类型比较
-                else {
-                    const inferredType = tNode.get(inferredTypeId);
-                    const expectedType = tNode.get(expectedTypeId);
-
-                    if (inferredType && expectedType) {
-                        // 字面量到原始类型
-                        if (inferredType.kind === "literal" && expectedType.kind === "primitive") {
-                            const litValue = inferredType.value;
-                            const primName = expectedType.name;
-                            if (typeof litValue === "number" && primName === "number") {
-                                isCompatible = true;
-                            } else if (typeof litValue === "string" && primName === "string") {
-                                isCompatible = true;
-                            } else if (typeof litValue === "boolean" && primName === "boolean") {
-                                isCompatible = true;
-                            }
-                        }
-                        // 数组元素类型兼容
-                        else if (inferredType.kind === "array" && expectedType.kind === "array") {
-                            const infElem = new DeterminantNodeState(inferredType.elementType);
-                            const expElem = new DeterminantNodeState(expectedType.elementType);
-                            if (infElem.equals(expElem)) {
-                                isCompatible = true;
-                            }
-                        }
-                        // union 成员匹配：inferred 匹配 union 中任一成员
-                        else if (expectedType.kind === "union") {
-                            for (const memberId of expectedType.types) {
-                                if (inferredTypeId === memberId || memberId === tNode.ANY) {
-                                    isCompatible = true;
-                                    break;
-                                }
-                                // 递归检查字面量→基元
-                                const memType = tNode.get(memberId);
-                                if (memType?.kind === "primitive" && inferredType.kind === "literal") {
-                                    if ((typeof inferredType.value === "number" && memType.name === "number") ||
-                                        (typeof inferredType.value === "string" && memType.name === "string") ||
-                                        (typeof inferredType.value === "boolean" && memType.name === "boolean")) {
-                                        isCompatible = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        // object-by-name: 同名类型视为兼容
-                        else if (inferredType.kind === "object" && expectedType.kind === "object") {
-                            if (inferredType.name && expectedType.name &&
-                                inferredType.name === expectedType.name) {
-                                isCompatible = true;
-                            }
-                        }
-                    }
-                }
+                const isCompatible = this._typesCompatible(inferredTypeId, expectedTypeId);
 
                 if (isCompatible) {
                     result.correct++;
