@@ -537,6 +537,7 @@ function secondPass(filePath: string, node: AstNode) {
       if (node.children && node.children.length >= 2) {
         const idNode = node.children?.filter(n => n.kind === "Identifier")[0];
         if (idNode && idNode.varId) {
+          meta.className.set(idNode.varId!, idNode.text!);
           emit.allocClass(idNode.varId!);
           varBindings.set(idNode.text!, idNode.varId!);
 

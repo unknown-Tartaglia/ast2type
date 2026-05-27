@@ -34,14 +34,18 @@ export class DeterminantStrategy implements Strategy {
     }
 
     merge(nodeId: VarId, graph: TypeGraph) {
-        // 简单的合并策略：取所有合并节点的类型的并集
         const edges = Array.from(graph.getFromEdges(nodeId)).filter(e => e.type === "sameType" || e.type === "ArgToParam");
-        const mergedTypes = new Set<NodeState>();
+        const mergedTypeIds = new Set<TypeId>();
+        // 保留当前类型，防止 extend 的加宽被 sameType 覆盖回窄类型（排除 any/unknown）
+        const cur = graph.nodes.get(nodeId);
+        if (cur && cur.val !== tNode.ANY && cur.val !== tNode.UNKNOWN) {
+            mergedTypeIds.add(cur.val);
+        }
         for (const edge of edges)
             if (edge.cand) {
-                mergedTypes.add(edge.cand);
+                mergedTypeIds.add(edge.cand.val);
             }
-        const ret = tNode.merge(Array.from(mergedTypes).map(t => t.val));
+        const ret = tNode.merge(Array.from(mergedTypeIds));
         return new DeterminantNodeState(ret);
     }
 

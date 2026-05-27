@@ -277,28 +277,45 @@ export class TypeGraph {
                 const toType = this.nodes.get(edge.to);
                 const newType = ty.getProperty(meta.propName.get(edge.to)!);
                 if (!newType) continue;
-                if (!toType || !toType.equals(newType)) {
+                if (!toType) {
                     this.setType(edge.to, newType);
                     worklist.push(edge.to);
+                } else {
+                    const merged = tNode.merge([toType.val, newType.val]);
+                    if (merged !== toType.val) {
+                        this.setType(edge.to, new DeterminantNodeState(merged));
+                        worklist.push(edge.to);
+                    }
                 }
             }
             if (edge.type === "ArrayElement") {
                 const toType = this.nodes.get(edge.to);
                 const newType = ty.getElement();
                 if (!newType) continue;
-                if (!toType || !toType.equals(newType)) {
+                if (!toType) {
                     this.setType(edge.to, newType);
                     worklist.push(edge.to);
+                } else {
+                    const merged = tNode.merge([toType.val, newType.val]);
+                    if (merged !== toType.val) {
+                        this.setType(edge.to, new DeterminantNodeState(merged));
+                        worklist.push(edge.to);
+                    }
                 }
             }
             if (edge.type === "call") {
-                // 函数调用：将函数返回类型传播给调用结果
                 const toType = this.nodes.get(edge.to);
                 const newType = ty.getReturnType();
                 if (!newType) continue;
-                if (!toType || !toType.equals(newType)) {
+                if (!toType) {
                     this.setType(edge.to, newType);
                     worklist.push(edge.to);
+                } else {
+                    const merged = tNode.merge([toType.val, newType.val]);
+                    if (merged !== toType.val) {
+                        this.setType(edge.to, new DeterminantNodeState(merged));
+                        worklist.push(edge.to);
+                    }
                 }
             }
             // 注解边、返回注解边、起源边和枚举成员边在getToEdges方向不需要特殊处理
@@ -402,6 +419,100 @@ export class TypeGraph {
             }
         }
         return [outJson, unkJson];
+    }
+
+    /** 统计推导类型的分布 */
+    typeStats() {
+        const byKind: Record<string, number> = {};
+        const primitives: Record<string, number> = {};
+        const literalTypes: Record<string, number> = {};  // "string"/"number"/"boolean"
+        const unionSizes: number[] = [];  // 每个 union 的成员数
+        let arrayCount = 0;
+        let maxArrayDepth = 0;
+        let totalDepth = 0;
+        let arrayWithAnyElement = 0;
+        let objectCount = 0;
+        let functionCount = 0;
+        let enumCount = 0;
+        let unknownCount = 0;
+        let totalNodes = 0;
+
+        const countType = (typeId: TypeId, depth: number, visited = new Set<TypeId>()) => {
+            if (visited.has(typeId)) return;  // 防止循环类型无限递归
+            visited.add(typeId);
+            const t = tNode.get(typeId);
+            if (!t) { unknownCount++; return; }
+
+            switch (t.kind) {
+                case "primitive":
+                    byKind["primitive"] = (byKind["primitive"] || 0) + 1;
+                    primitives[t.name] = (primitives[t.name] || 0) + 1;
+                    break;
+                case "literal":
+                    byKind["literal"] = (byKind["literal"] || 0) + 1;
+                    literalTypes[typeof t.value] = (literalTypes[typeof t.value] || 0) + 1;
+                    break;
+                case "array":
+                    byKind["array"] = (byKind["array"] || 0) + 1;
+                    arrayCount++;
+                    totalDepth += depth;
+                    if (depth > maxArrayDepth) maxArrayDepth = depth;
+                    if (t.elementType === tNode.ANY) arrayWithAnyElement++;
+                    countType(t.elementType, depth + 1, visited);
+                    break;
+                case "union":
+                    byKind["union"] = (byKind["union"] || 0) + 1;
+                    unionSizes.push(t.types.length);
+                    for (const memberId of t.types) countType(memberId, depth, visited);
+                    break;
+                case "function":
+                    byKind["function"] = (byKind["function"] || 0) + 1;
+                    functionCount++;
+                    countType(t.returnType, depth, visited);
+                    for (const idx of Object.keys(t.param)) {
+                        countType(t.param[Number(idx)].type, depth, visited);
+                    }
+                    break;
+                case "object":
+                    byKind["object"] = (byKind["object"] || 0) + 1;
+                    objectCount++;
+                    for (const prop of Object.keys(t.properties)) {
+                        countType(t.properties[prop], depth, visited);
+                    }
+                    break;
+                case "enum":
+                    byKind["enum"] = (byKind["enum"] || 0) + 1;
+                    enumCount++;
+                    break;
+            }
+        };
+
+        for (const [, state] of this.nodes) {
+            totalNodes++;
+            countType(state.val, 0);
+        }
+
+        return {
+            totalNodes,
+            byKind,
+            primitives,
+            literalTypes,
+            array: {
+                count: arrayCount,
+                maxDepth: maxArrayDepth,
+                avgDepth: arrayCount > 0 ? +(totalDepth / arrayCount).toFixed(1) : 0,
+                withAnyElement: arrayWithAnyElement,
+            },
+            union: {
+                count: unionSizes.length,
+                avgSize: unionSizes.length > 0 ? +(unionSizes.reduce((a, b) => a + b, 0) / unionSizes.length).toFixed(1) : 0,
+                maxSize: unionSizes.length > 0 ? Math.max(...unionSizes) : 0,
+            },
+            objects: objectCount,
+            functions: functionCount,
+            enums: enumCount,
+            unknown: unknownCount,
+        };
     }
 
     /** 递归判断两个 TypeId 是否兼容 */

@@ -158,13 +158,26 @@ export class Solver {
         // 使用策略进行传播
         let iteration = 0;
         const maxIterations = 1000000;
+        const visitCount = new Map<VarId, number>();
         while (this.worklist.length > 0) {
             iteration++;
             if (iteration > maxIterations) {
                 console.error(`Solver exceeded maximum iterations (${maxIterations}), possible infinite loop`);
+                // 诊断：找出被重复处理最多的节点
+                const top = Array.from(visitCount.entries())
+                    .sort((a, b) => b[1] - a[1]).slice(0, 10);
+                console.error("Top 10 most-visited nodes:");
+                for (const [id, count] of top) {
+                    const t = this.graph.nodes.get(id);
+                    const edgeTypes = Array.from(this.graph.getFromEdges(id))
+                        .map(e => e.type).join(',');
+                    console.error(`  varId=${id} visits=${count} type=${t?.toString().slice(0,80)} fromEdges=[${edgeTypes}] name=${meta.text.get(id) || '?'}`);
+                }
                 break;
             }
             const nodeId = this.worklist.shift()!;
+            const cnt = (visitCount.get(nodeId) || 0) + 1;
+            visitCount.set(nodeId, cnt);
             this.graph.traceEvent("propagate:before", nodeId);
             let worklist;
             worklist = this.strategy.propagate(nodeId, this.graph);
@@ -209,6 +222,11 @@ export class Solver {
             fs.mkdirSync(path.dirname(outfile), { recursive: true }); // 创建目录
             writeJsonStream(outfile, groups[file]);
         }
+
+        // 类型分布统计
+        const stats = this.graph.typeStats();
+        const statsOut = path.join(outputDir, "typestats.json");
+        writeJsonStream(statsOut, stats);
 
         // 评估标注
         if (eva) {
