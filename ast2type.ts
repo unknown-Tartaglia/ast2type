@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { Command } from "commander";
-import { FactStore, Emitter, VarId, Fact } from "./ast2type/fact"
+import { FactStore, Emitter, VarId, Fact, TypeId } from "./ast2type/fact"
 import { MetaStore } from "./ast2type/meta"
 import { Solver } from "./ast2type/solver";
 import { tNodeStore } from "./ast2type/nType";
@@ -157,8 +157,8 @@ function firstPass(filePath: string, ast: AstNode) {
       walk(child);
     }
 
-    // 还原filepath中的^为\\
-    let realPath = path.basename(filePath).replace(/\^/g, "\\").replace(/\.ast\.json/g, "");
+    // 还原filepath中的^为/
+    let realPath = path.basename(filePath).replace(/\^/g, "/").replace(/\.ast\.json/g, "");
 
     // export Class Enum TypeAlias Interface
     const exportedKinds = ["ClassDeclaration", "InterfaceDeclaration", "EnumDeclaration", "TypeAliasDeclaration", "FunctionDeclaration"];
@@ -367,10 +367,27 @@ function secondPass(filePath: string, node: AstNode) {
       if (LOG_IDENTIFIER_NODE)
         console.log(`TypeAlias ${left.text} has ID ${left.varId}`);
       varBindings.set(left.text!, left.varId);
+      meta.declKind.set(left.varId!, "TypeAliasDeclaration");
 
-      const right = node.children?.find(n => n.kind === "TypeReference");
-      if (right && right.varId) {
-        emit.alias(right.varId!, left.varId!);
+      // 在子节点中查找类型体（排除 Identifier / 关键字 / 标点 token）
+      const typeKinds = ["TypeLiteral", "UnionType", "IntersectionType", "ArrayType", "FunctionType",
+        "TypeReference", "StringKeyword", "NumberKeyword", "BooleanKeyword", "VoidKeyword",
+        "AnyKeyword", "UndefinedKeyword", "NullKeyword", "LiteralType", "ParenthesizedType",
+        "TypeQuery", "TypePredicate", "TupleType"];
+      const typeBody = node.children?.find(n => typeKinds.includes(n.kind));
+
+      if (typeBody) {
+        if (typeBody.kind === "TypeLiteral") {
+          meta.objectName.set(left.varId!, left.text!);
+          emit.allocObj(left.varId!);
+        } else if (typeBody.kind === "TypeReference") {
+          emit.alias(typeBody.varId!, left.varId!);
+        } else {
+          const typeId = astTypeToTypeId(typeBody);
+          if (typeId !== null) {
+            emit.allocPrimitive(left.varId!, typeId);
+          }
+        }
       }
 
       //处理namespace
@@ -692,27 +709,29 @@ function secondPass(filePath: string, node: AstNode) {
       for (const ndimpt of ndimpts) {
         let target;
         if (ndimpt.children?.length === 1) {
+          // import { X }
           idNode = ndimpt.children[0];
-          varBindings.set(idNode.text!, idNode.varId!);
+        } else if (ndimpt.children?.length === 2 && ndimpt.children[0].kind === "TypeKeyword") {
+          // import { type X } — type-only import specifier
+          idNode = ndimpt.children[1];
+        } else if (ndimpt.children?.length === 3) {
+          // import { X as Y }
+          idNode = ndimpt.children[2];
+        }
 
+        if (idNode?.varId && idNode.text) {
+          varBindings.set(idNode.text!, idNode.varId!);
           if (!resolvedFile) {
             emit.flow(0, idNode.varId!, `Failed import ${idNode.text} from ${moduleSpecifier}`);
+          } else if (ndimpt.children?.length === 3) {
+            target = globalExportMap[resolvedFile]?.[ndimpt.children[0].text!];
           } else {
             target = globalExportMap[resolvedFile]?.[idNode.text!];
-          }
-        } else if(ndimpt.children?.length === 3) {
-          idNode = ndimpt.children[2];
-          varBindings.set(idNode.text!, idNode.varId!);
-
-          if (!resolvedFile) {
-            emit.flow(0, idNode.varId!, `Failed import ${idNode.text} from ${moduleSpecifier}`);
-          } else {
-            target = globalExportMap[resolvedFile]?.[ndimpt.children[0].text!];
           }
         }
 
         if (target !== undefined && idNode) {
-          emit.flow(target, idNode.varId!, `Success import ${idNode.text} from ${moduleSpecifier}`);  
+          emit.flow(target, idNode.varId!, `Success import ${idNode.text} from ${moduleSpecifier}`);
         }
       }
 
@@ -1249,16 +1268,29 @@ function secondPass(filePath: string, node: AstNode) {
         paramBindings.clear();
       }
     },
+    // 处理类型引用（如类型注解中的命名类型、as 表达式中的类型等）
+    TypeReference(node) {
+      if (node.varId === undefined) return;
+      const idNode = node.children?.find(n => n.kind === "Identifier");
+      if (idNode && idNode.text) {
+        const bindingId = varBindings.get(idNode.text) ?? paramBindings.get(idNode.text);
+        if (bindingId !== undefined) {
+          emit.flow(bindingId, node.varId!, `TypeReference ${idNode.text}`);
+        }
+      }
+    },
     // 处理类型断言和as表达式
     AsExpression(node) {
       if (node.children && node.children.length >= 3) {
         const exprNode = node.children[0];
         const asExprNode = node.children[2];
-        if (exprNode.varId !== undefined && node.varId !== undefined && asExprNode.text) {
-          emit.flow(exprNode.varId!, asExprNode.varId!, `${exprNode.text!} as ${asExprNode.text!}`);
+        // x as T: 结果类型应为 T 的类型引用，同时保留原表达式类型的信息
+        if (exprNode.varId !== undefined && node.varId !== undefined) {
+          emit.flow(exprNode.varId!, node.varId!, `${exprNode.text!} as ${asExprNode.text!}`);
         }
-        // TODO: 添加类型断言约束
-        const typeNode = node.children[2];
+        if (asExprNode.varId !== undefined && node.varId !== undefined) {
+          emit.flow(asExprNode.varId!, node.varId!, `TypeRef ${asExprNode.text} of as expr`);
+        }
       }
     },
     // 处理作用域{
@@ -1340,17 +1372,17 @@ function secondPass(filePath: string, node: AstNode) {
 function resolveImportPath(currentFilePath: string, importSpecifier: string): string | undefined {
   if (importSpecifier.startsWith(".")) {
     // 本地模块：相对路径 + 补后缀
-    const realCurrentPath = path.basename(currentFilePath).replace(/\^/g, "\\").replace(/\.ast\.json/g, "");
+    const realCurrentPath = path.basename(currentFilePath).replace(/\^/g, "/").replace(/\.ast\.json/g, "");
     const absbase = path.resolve(path.dirname(realCurrentPath), importSpecifier);
     const base = path.relative(process.cwd(), absbase);
     for (const extname of ["", ".ts", ".js", ".ets", ".tsx", ".d.ts", ".d.ets"]) {
       let ret = base + extname;
-      if (fs.existsSync(path.join(path.dirname(currentFilePath), ret.replace(/\\/g, "^") + ".ast.json")))
+      if (fs.existsSync(path.join(path.dirname(currentFilePath), ret.replace(/\//g, "^") + ".ast.json")))
         return ret;
-      ret = base + "\\index" + extname;
-      if (fs.existsSync(path.join(path.dirname(currentFilePath), ret.replace(/\\/g, "^") + ".ast.json")))
+      ret = base + "/index" + extname;
+      if (fs.existsSync(path.join(path.dirname(currentFilePath), ret.replace(/\//g, "^") + ".ast.json")))
         return ret;
-      // console.error(`base: ${path.join(path.dirname(currentFilePath), ret.replace(/\\/g, "^"))}`);
+      // console.error(`base: ${path.join(path.dirname(currentFilePath), ret.replace(/\//g, "^"))}`);
     }
     return undefined
   } else {
@@ -1366,8 +1398,116 @@ function resolveImportPath(currentFilePath: string, importSpecifier: string): st
       importSpecifier = importSpecifier.split("/")[0];
     if (globalImportMap.has(importSpecifier)) {
       // console.log(`${path.basename(globalImportMap.get(importSpecifier)!).replace(/\^/g, "\\").replace(/\.ast\.json/g, "")}`);
-      return path.basename(globalImportMap.get(importSpecifier)!).replace(/\^/g, "\\").replace(/\.ast\.json/g, "");
+      return path.basename(globalImportMap.get(importSpecifier)!).replace(/\^/g, "/").replace(/\.ast\.json/g, "");
     }
+  }
+}
+
+// 将类型 AST 节点递归转换为 TypeId，供 TypeAliasDeclaration 等使用
+function astTypeToTypeId(node: AstNode): TypeId | null {
+  // SyntaxList 是 ts-morph 的语法包装层，直接递归其子节点取第一个有效类型
+  function walkChildren(n: AstNode): TypeId | null {
+    const children = n.children;
+    if (!children) return null;
+    for (const c of children) {
+      if (c.kind === "BarToken" || c.kind === "FirstBarToken" || c.kind === "CommaToken") continue;
+      const t = astTypeToTypeId(c);
+      if (t !== null) return t;
+    }
+    return null;
+  }
+
+  switch (node.kind) {
+    case "SyntaxList":
+      return walkChildren(node);
+    case "StringKeyword": return tNode.STRING;
+    case "NumberKeyword": return tNode.NUMBER;
+    case "BooleanKeyword": return tNode.BOOLEAN;
+    case "VoidKeyword": return tNode.VOID;
+    case "AnyKeyword": return tNode.ANY;
+    case "UndefinedKeyword": return tNode.UNDEFINED;
+    case "NullKeyword": return tNode.newTypeNode({ kind: "literal", value: null });
+
+    case "UnionType": {
+      const effective = node.children?.find(c => c.kind === "SyntaxList")?.children || node.children || [];
+      const types = effective
+        .filter(c => c.kind !== "BarToken" && c.kind !== "FirstBarToken")
+        .map(c => astTypeToTypeId(c))
+        .filter((t): t is number => t !== null);
+      if (types.length === 0) return null;
+      if (types.length === 1) return types[0];
+      return tNode.newTypeNode({ kind: "union", types });
+    }
+    case "IntersectionType": {
+      return tNode.ANY;
+    }
+    case "ArrayType": {
+      const elemType = (node.children || [])
+        .map(c => astTypeToTypeId(c))
+        .find(t => t !== null) ?? tNode.UNKNOWN;
+      return tNode.newTypeNode({ kind: "array", elementType: elemType });
+    }
+    case "ParenthesizedType": {
+      const inner = node.children?.find(c =>
+        c.kind !== "OpenParenToken" && c.kind !== "CloseParenToken");
+      return inner ? astTypeToTypeId(inner) : null;
+    }
+    case "FunctionType": {
+      const params: Record<number, { id: number; type: number }> = {};
+      const children = node.children || [];
+      let paramIdx = 0;
+      let returnTypeId = tNode.UNKNOWN;
+      let inReturn = false;
+      const funcId = node.varId!;
+
+      for (const child of children) {
+        if (child.kind === "EqualsGreaterThanToken") {
+          inReturn = true;
+          continue;
+        }
+        if (inReturn) {
+          const rt = walkChildren(child);
+          if (rt !== null) returnTypeId = rt;
+        } else {
+          const pt = walkChildren(child);
+          if (pt !== null) {
+            params[paramIdx++] = { id: -(funcId * 1000 + paramIdx), type: pt };
+          }
+        }
+      }
+      return tNode.newTypeNode({
+        kind: "function", name: "", id: funcId,
+        param: params, returnType: returnTypeId,
+      });
+    }
+    case "TypeLiteral": {
+      return tNode.newTypeNode({
+        kind: "object", name: `type_${node.varId}`,
+        id: node.varId ?? 0, properties: {},
+      });
+    }
+    // LiteralType: 包含 StringLiteral / NumericLiteral / TrueKeyword / FalseKeyword / NullKeyword 等
+    case "LiteralType": {
+      const literal = node.children?.find(c =>
+        ["StringLiteral", "NumericLiteral", "TrueKeyword", "FalseKeyword",
+          "NullKeyword", "FirstLiteralToken", "BigIntLiteral"].includes(c.kind));
+      if (!literal) return null;
+      let value: any;
+      if (literal.kind === "StringLiteral") value = literal.text?.replace(/^['"]|['"]$/g, "") ?? "";
+      else if (literal.kind === "NumericLiteral" || literal.kind === "FirstLiteralToken") value = Number(literal.text);
+      else if (literal.kind === "TrueKeyword") value = true;
+      else if (literal.kind === "FalseKeyword") value = false;
+      else if (literal.kind === "NullKeyword") value = null;
+      else if (literal.kind === "BigIntLiteral") value = BigInt(literal.text ?? "0");
+      if (value === undefined) return null;
+      return tNode.newTypeNode({ kind: "literal", value });
+    }
+    // TypeQuery ("typeof x") 和 TypeReference 无法静态确定，返回 UNKNOWN
+    case "TypeQuery":
+    case "TypeReference":
+      return tNode.UNKNOWN;
+    default:
+      return null;
   }
 }
 
@@ -1394,7 +1534,7 @@ function injectGroundTruth(groundtruthPath: string) {
 
   for (const [filePath, annotations] of Object.entries(groundtruth)) {
     // Normalize ground truth file path for matching with meta.file (which uses '^' as separator)
-    const normalizedGtPath = filePath.replace(/\//g, "\\");
+    const normalizedGtPath = filePath;
 
     for (const ann of annotations) {
       // Find varId by (offset + identifier text + file path) matching in the erased AST
@@ -1409,7 +1549,7 @@ function injectGroundTruth(groundtruthPath: string) {
         }
         // Check file name match — try full path suffix first, then basename fallback
         const metaFile = meta.file.get(varId) || "";
-        const normalizedMeta = metaFile.replace(/\^/g, "\\").replace(/\.ast\.json$/, "");
+        const normalizedMeta = metaFile.replace(/\^/g, "/").replace(/\.ast\.json$/, "");
         if (normalizedMeta.endsWith(normalizedGtPath)) {
           targetVarId = varId;
           break;
@@ -1580,4 +1720,4 @@ function getAstFiles(dir: string): string[] {
 
 main();
 
-export {tNode, solver, outputDir, meta, injectFeedback};
+export {tNode, solver, outputDir, meta, injectFeedback, globalVarBindings};

@@ -182,8 +182,9 @@ function main() {
       const merged = mergeReplacements(replacements);
       merged.sort((a, b) => b.start - a.start);
       for (const { start, end } of merged) {
+        const segment = erasedText.substring(start, end);
         erasedText = erasedText.substring(0, start)
-          + " ".repeat(end - start)
+          + segment.replace(/\S/g, " ")
           + erasedText.substring(end);
       }
       const outPath = path.join(outputDir, relativePath);

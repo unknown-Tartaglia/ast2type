@@ -139,7 +139,13 @@ export class tNodeStore {
         for (const ty of set) {
             const typeNode = this.get(ty);
             let cand = ty;
-            if (typeNode?.kind === "literal" && (set.size > 1 || has_unknown)) cand = typeof typeNode.value === "number" ? this.NUMBER : typeof typeNode.value === "string" ? this.STRING : this.BOOLEAN;
+            if (typeNode?.kind === "literal" && (set.size > 1 || has_unknown)) {
+                if (typeNode.value === undefined) {
+                    cand = this.UNDEFINED;
+                } else if (typeNode.value !== null) {
+                    cand = typeof typeNode.value === "number" ? this.NUMBER : typeof typeNode.value === "string" ? this.STRING : this.BOOLEAN;
+                }
+            }
             if (typeNode?.kind === "array") {
                 arrList.push(cand);
                 continue;
@@ -175,7 +181,7 @@ export class tNodeStore {
                 ret = `primitive:${t.name}`;
                 break;
             case "literal":
-                ret = `literal:${t.value}`;
+                ret = `literal:${typeof t.value}:${t.value}`;
                 break;
             case "array":
                 ret = `array:${t.elementType}`;
@@ -388,12 +394,12 @@ export class tNodeStore {
         const primMap: Record<string, number> = {
             number: this.NUMBER, string: this.STRING, boolean: this.BOOLEAN,
             void: this.VOID, any: this.ANY, undefined: this.UNDEFINED,
-            unknown: this.UNKNOWN, null: this.UNDEFINED,
+            unknown: this.UNKNOWN,
         };
         if (primMap[s] !== undefined) return primMap[s];
 
-        // 2. 字面量
-        if (/^["'].*["']$/.test(s)) {
+        // 2. 字面量（内部不能含同种引号，避免吃进 'a' | 'b'）
+        if (/^'[^']*'$/.test(s) || /^"[^"]*"$/.test(s)) {
             return this.newTypeNode({ kind: "literal", value: s.slice(1, -1) });
         }
         if (/^-?\d+(\.\d+)?$/.test(s)) {
@@ -401,6 +407,7 @@ export class tNodeStore {
         }
         if (s === "true") return this.newTypeNode({ kind: "literal", value: true });
         if (s === "false") return this.newTypeNode({ kind: "literal", value: false });
+        if (s === "null") return this.newTypeNode({ kind: "literal", value: null });
 
         // 3. typeof X → 在 JS 擦除后等价于 X 本身
         if (s.startsWith("typeof ")) {

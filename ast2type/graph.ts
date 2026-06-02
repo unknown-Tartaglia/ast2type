@@ -1,4 +1,4 @@
-import { meta, outputDir, solver, tNode } from "../ast2type";
+import { meta, outputDir, solver, tNode, globalVarBindings } from "../ast2type";
 import { VarId, TypeId } from "./fact"
 import { NodeState, tNodeStore, DeterminantNodeState } from "./nType";
 import * as path from "path";
@@ -517,54 +517,95 @@ export class TypeGraph {
 
     /** 递归判断两个 TypeId 是否兼容 */
     private _typesCompatible(inferredId: TypeId, expectedId: TypeId): boolean {
+        return this._assessCompatibility(inferredId, expectedId) === "compatible";
+    }
+
+    /** 评估兼容性，三分：compatible / incompatible / undetermined */
+    private _assessCompatibility(inferredId: TypeId, expectedId: TypeId, _aliasDepth: number = 0): "compatible" | "incompatible" | "undetermined" {
         // 严格相等
-        if (inferredId === expectedId) return true;
+        if (inferredId === expectedId) return "compatible";
         // any / unknown 与任何类型兼容
-        if (inferredId === tNode.ANY || expectedId === tNode.ANY) return true;
-        if (inferredId === tNode.UNKNOWN || expectedId === tNode.UNKNOWN) return true;
+        if (inferredId === tNode.ANY || expectedId === tNode.ANY) return "compatible";
+        if (inferredId === tNode.UNKNOWN || expectedId === tNode.UNKNOWN) return "compatible";
 
         const inf = tNode.get(inferredId);
         const exp = tNode.get(expectedId);
-        if (!inf || !exp) return false;
+        if (!inf || !exp) return "incompatible";
 
         // 字面量 → 原始类型
         if (inf.kind === "literal" && exp.kind === "primitive") {
-            return (typeof inf.value === "number" && exp.name === "number") ||
-                   (typeof inf.value === "string" && exp.name === "string") ||
-                   (typeof inf.value === "boolean" && exp.name === "boolean");
+            const ok = (typeof inf.value === "number" && exp.name === "number") ||
+                       (typeof inf.value === "string" && exp.name === "string") ||
+                       (typeof inf.value === "boolean" && exp.name === "boolean");
+            return ok ? "compatible" : "incompatible";
         }
 
-        // 推导类型是 union → 任一成员与期望兼容即可（推导偏宽算正确）
+        // 推导类型是 union → 任一成员与期望兼容即可
         if (inf.kind === "union") {
-            return inf.types.some(t => this._typesCompatible(t, expectedId));
+            if (inf.types.some(t => this._typesCompatible(t, expectedId))) return "compatible";
+            // 期望是简单类型（primitive/literal），union 成员都不匹配 → 明确错误
+            return (exp.kind === "primitive" || exp.kind === "literal") ? "incompatible" : "undetermined";
         }
 
         // 期望类型是 union → 推导与任一成员兼容即可
         if (exp.kind === "union") {
-            return exp.types.some(t => this._typesCompatible(inferredId, t));
+            if (exp.types.some(t => this._typesCompatible(inferredId, t))) return "compatible";
+            // 原始类型是所有 union member 的基础类型 → 推断合理，但无法精确
+            if (inf.kind === "primitive") {
+                const allRelated = exp.types.every(t => {
+                    const tm = tNode.get(t);
+                    return (tm?.kind === "literal" && typeof tm.value === inf.name) ||
+                           (tm?.kind === "primitive" && tm.name === inf.name);
+                });
+                if (allRelated) return "undetermined";
+            }
+            // 简单类型明确不属于任何 union 成员 → 明确错误
+            return (inf.kind === "primitive" || inf.kind === "literal") ? "incompatible" : "undetermined";
         }
 
         // 数组兼容
         if (inf.kind === "array" && exp.kind === "array") {
-            return this._typesCompatible(inf.elementType, exp.elementType);
+            return this._assessCompatibility(inf.elementType, exp.elementType);
         }
 
         // 推导是数组，期望是命名对象 Array → 兼容
         if (inf.kind === "array" && exp.kind === "object" && exp.name === "Array") {
-            return true;
+            return "compatible";
         }
 
         // 函数兼容：比较返回类型
         if (inf.kind === "function" && exp.kind === "function") {
-            return this._typesCompatible(inf.returnType, exp.returnType);
+            return this._assessCompatibility(inf.returnType, exp.returnType);
         }
 
-        // 同名 object
+        // 两边都是 object，名字不同 → 无法判定（可能是命名缺失，非推断错误）
         if (inf.kind === "object" && exp.kind === "object") {
-            if (inf.name && exp.name && inf.name === exp.name) return true;
+            if (inf.name && exp.name && inf.name === exp.name) return "compatible";
+            return "undetermined";
         }
 
-        return false;
+        // expected 是泛型擦除后的空壳（Promise、Partial 等）→ 无法判定
+        if (exp.kind === "object" && /^(Promise|Partial|Pick|Omit|Record|Readonly|Required|ReturnType|InstanceType)$/.test(exp.name)) {
+            return "undetermined";
+        }
+
+        // 类型谓词 "x is T" → 无法判定（parseTypeString 无法解析）
+        if (exp.kind === "object" && /\bis\b/.test(exp.name)) {
+            return "undetermined";
+        }
+
+        // 期望是命名对象，从图中查找已求解的类型别名/接口具体类型
+        if (_aliasDepth < 5 && exp.kind === "object" && exp.name) {
+          const varId = globalVarBindings.get(exp.name);
+          if (varId !== undefined) {
+            const nodeState = this.nodes.get(varId);
+            if (nodeState && nodeState.val !== tNode.UNKNOWN && nodeState.val !== tNode.ANY) {
+              return this._assessCompatibility(inferredId, nodeState.val, _aliasDepth + 1);
+            }
+          }
+        }
+
+        return "incompatible";
     }
 
     evaluate() {
@@ -578,6 +619,7 @@ export class TypeGraph {
             missing: 0,
             any: 0, // 统计any出现次数
             unknown: 0, // 统计无法判断类型的注释出现次数
+            undetermined: 0,
             rightEdges: [] as { kind: string, from: VarId, to: VarId, inferredType: string, expectedType: string }[],
             wrongEdges: [] as { kind: string, from: VarId, to: VarId, inferredType: string, expectedType: string }[],
             undeterminedEdges: [] as { kind: string, from: VarId, to: VarId, inferredType: string, expectedType: string }[],
@@ -644,13 +686,6 @@ export class TypeGraph {
                 if (!inferredState) {
                     // 没有推导类型信息，视为缺失
                     result.missing++;
-                    result.undeterminedEdges.push({
-                        kind: edge.type,
-                        from: edge.from,
-                        to: edge.to,
-                        inferredType: "missing",
-                        expectedType: expectedTypeStr
-                    });
                     continue;
                 }
 
@@ -660,22 +695,24 @@ export class TypeGraph {
                 // 检查推导类型是否为unknown
                 if (inferredTypeId === tNode.UNKNOWN) {
                     result.missing++;
-                    result.undeterminedEdges.push({
+                    continue;
+                }
+
+                // === 类型兼容性检查 ===
+                const assessment = this._assessCompatibility(inferredTypeId, expectedTypeId);
+
+                if (assessment === "compatible") {
+                    result.correct++;
+                    result.rightEdges.push({
                         kind: edge.type,
                         from: edge.from,
                         to: edge.to,
                         inferredType: inferredTypeStr,
                         expectedType: expectedTypeStr
                     });
-                    continue;
-                }
-
-                // === 类型兼容性检查 ===
-                const isCompatible = this._typesCompatible(inferredTypeId, expectedTypeId);
-
-                if (isCompatible) {
-                    result.correct++;
-                    result.rightEdges.push({
+                } else if (assessment === "undetermined") {
+                    result.undetermined++;
+                    result.undeterminedEdges.push({
                         kind: edge.type,
                         from: edge.from,
                         to: edge.to,
@@ -697,8 +734,10 @@ export class TypeGraph {
 
         // 输出汇总报告
         const other = result.any + result.unknown;
-        const acc = result.correct > 0 ? result.correct / (result.correct + result.wrong) : 0;
-        const cov = result.correct + result.wrong > 0 ? (result.correct + result.wrong) / (result.correct + result.wrong + result.missing) : 0;
+        const evaluable = result.correct + result.wrong + result.undetermined;
+        const acc = evaluable > 0 ? result.correct / evaluable : 0;
+        const acc_excl_undetermined = result.correct + result.wrong > 0 ? result.correct / (result.correct + result.wrong) : 0;
+        const cov = evaluable > 0 ? evaluable / (evaluable + result.missing) : 0;
 
         // 输出正确的边列表
         if (result.rightEdges.length > 0) {
@@ -708,6 +747,18 @@ export class TypeGraph {
                 const toText = meta.text.get(w.to) || `var_${w.to}`;
                 console.log(
                     `  [${w.kind}] ${fromText}[${w.from}] (${w.inferredType})  ===  ${toText} (${w.expectedType})`
+                );
+            }
+        }
+
+        // 输出待评估列表
+        if (result.undeterminedEdges.length > 0) {
+            console.log("\n--- Undetermined (待评估) ---");
+            for (const w of result.undeterminedEdges) {
+                const fromText = meta.text.get(w.from) || `var_${w.from}`;
+                const toText = meta.text.get(w.to) || `var_${w.to}`;
+                console.log(
+                    `  [${w.kind}] ${fromText}[${w.from}] (${w.inferredType})  ?=  ${toText} (${w.expectedType})`
                 );
             }
         }
@@ -728,10 +779,12 @@ export class TypeGraph {
         console.log(`Total annotations: ${result.total}`);
         console.log(`Correct: ${result.correct}`);
         console.log(`Wrong: ${result.wrong}`);
+        console.log(`Undetermined (待评估): ${result.undetermined}`);
         console.log(`Missing: ${result.missing}`);
         console.log(`Ignored: any * ${result.any} + unknown * ${result.unknown} = ${other}`);
         console.log(`Coverage: ${(cov * 100).toFixed(2)}%`);
-        console.log(`Effective accuracy: ${(acc * 100).toFixed(2)}%`);
+        console.log(`Accuracy (excl. undetermined): ${(acc_excl_undetermined * 100).toFixed(2)}%`);
+        console.log(`Accuracy (incl. undetermined as wrong): ${(acc * 100).toFixed(2)}%`);
 
         return result;
     }
