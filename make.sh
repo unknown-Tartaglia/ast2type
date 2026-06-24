@@ -6,6 +6,7 @@
 #   ./make.sh <目录> --agent          确定性 + Agent LLM 推断
 #   ./make.sh <目录> --trace <varId>   追踪某个 varId 的类型变化
 #   ./make.sh <目录> -f <file>         反馈注入模式
+#   ./make.sh <目录> --js              JS 项目模式（跳过擦除阶段）
 #
 # 选项可组合:
 #   ./make.sh <dir> --prepare --agent --trace 9854
@@ -36,6 +37,7 @@ mode="standard"
 trace_id=""
 feedback=""
 prepare=false
+js_mode=false
 shift
 
 while [ $# -gt 0 ]; do
@@ -56,6 +58,9 @@ while [ $# -gt 0 ]; do
             feedback="$1"
             mode="feedback"
             ;;
+        --js)
+            js_mode=true
+            ;;
         *)
             echo "未知参数: $1"
             exit 1
@@ -65,7 +70,10 @@ while [ $# -gt 0 ]; do
 done
 
 # 智能推断路径
-if [[ "$dir" == *_output ]]; then
+if [ "$js_mode" = true ]; then
+    input_dir="${dir}_output"
+    gt=""
+elif [[ "$dir" == *_output ]]; then
     input_dir="$dir"
     base="${dir%_output}"
     if [[ "$base" == *_erase ]]; then
@@ -81,27 +89,34 @@ else
     gt="${dir}_erase/_groundtruth.json"
 fi
 
-# 检查 input_dir 是否存在
-if [ ! -d "$input_dir" ]; then
-    echo "错误: 输入目录 '$input_dir' 不存在，请先 --prepare"
-    exit 1
-fi
 
 if [ "$prepare" = true ]; then
-    # 第一阶段: 擦除类型标注
-    echo "=== 擦除类型标注 ==="
-    node --max-old-space-size=40960 -r ts-node/register eraseAnnotation.ts -i "$dir" -o "${dir}_erase"
+    if [ "$js_mode" != true ]; then
+        # 第一阶段: 擦除类型标注 (TS only)
+        echo "=== 擦除类型标注 ==="
+        node --max-old-space-size=40960 -r ts-node/register eraseAnnotation.ts -i "$dir" -o "${dir}_erase"
+        ast_input="${dir}_erase"
+    else
+        # JS 模式: 跳过擦除，直接对源码生成 AST
+        echo "=== JS 模式: 跳过擦除，直接生成 AST ==="
+        ast_input="$dir"
+    fi
 
     # 第二阶段: 生成 AST
     echo "=== 生成 AST ==="
-    node --max-old-space-size=40960 -r ts-node/register code2ast.ts -i "${dir}_erase"
+    node --max-old-space-size=40960 -r ts-node/register code2ast.ts -i "$ast_input"
+else
+    # 非 prepare 模式：检查输入目录是否存在
+    if [ ! -d "$input_dir" ]; then
+        echo "错误: 输入目录 '$input_dir' 不存在，请先 --prepare"
+        exit 1
+    fi
 fi
 
 # 第三阶段: 类型推断
 echo "=== 类型推断 (模式: $mode) ==="
 gt_arg=()
 [ -n "$gt" ] && [ -f "$gt" ] && gt_arg=(-g "$gt")
-
 case "$mode" in
     standard)
         node --max-old-space-size=40960 -r ts-node/register ast2type.ts \

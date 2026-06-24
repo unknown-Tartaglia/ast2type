@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { Command } from "commander";
+import { writeJsonStream } from "./code2ast";
 import { FactStore, Emitter, VarId, Fact, TypeId } from "./ast2type/fact"
 import { MetaStore } from "./ast2type/meta"
 import { Solver } from "./ast2type/solver";
@@ -19,7 +20,7 @@ program
   .option("--agent", "Enable LLM agent to infer unknown declaration types in-loop")
   .option("--sourcedir <dir>", "Erased source directory for agent (auto-derived if omitted)")
   .option("--api-key <key>", "API key for agent (or set DEEPSEEK_API_KEY env var)")
-  .option("--trace <varId>", "Trace type changes for a specific varId, output to trace.json");
+  .option("--trace <varId>", "Trace type changes for a specific varId, output to trace.json")
 program.parse(process.argv);
 
 const options = program.opts();
@@ -279,6 +280,7 @@ function secondPass(filePath: string, node: AstNode) {
     },
     // 处理函数声明
     FunctionDeclaration(node) {
+      meta.v8Kind.set(node.varId!, "FunctionDeclaration");
       if (node.children) {
         const idNode = node.children?.find(n => n.kind === "Identifier");
         if (idNode && idNode.varId !== undefined && idNode.text) {
@@ -355,6 +357,7 @@ function secondPass(filePath: string, node: AstNode) {
       if (firstAssignmentIndex && firstAssignmentIndex !== -1) {
         const right = node.children?.[firstAssignmentIndex + 1];
         meta.v8Kind.set(node.varId!, "Assignment");
+        meta.v8Kind.set(left.varId!, "VariableDeclaration");
         meta.offset.set(node.varId!, right?.offset!);
         if (left.varId !== undefined && right?.varId !== undefined) {
           emit.flow(right.varId!, left.varId!, `variable ${left.text!} = ${right.text!}`);
@@ -1706,6 +1709,7 @@ async function main() {
   solver.graph.dumpTrace(outputDir);
 }
 
+
 // // 递归获取所有 AST 文件
 function getAstFiles(dir: string): string[] {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -1713,7 +1717,7 @@ function getAstFiles(dir: string): string[] {
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) files = files.concat(getAstFiles(fullPath));
-    else if (entry.name.endsWith(".ast.json")) files.push(fullPath);
+    else if (entry.name.endsWith(".ast.json") && !entry.name.includes(".d.ts")) files.push(fullPath);
   }
   return files;
 }
