@@ -4,7 +4,8 @@
   "description": "基于约束的JavaScript/TypeScript类型推导工具，能够从源代码中提取类型信息并生成结构化类型定义",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npm run test:regression",
+    "test:regression": "python3 -m unittest discover -v -s tests/regression -p 'test_*.py'"
   },
   "keywords": [],
   "author": "",
