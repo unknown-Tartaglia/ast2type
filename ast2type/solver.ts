@@ -9,6 +9,7 @@ import { writeJsonStream } from "../code2ast";
 
 export interface UnkSpot {
   id: number;
+  slot: AgentCandidateSlot;
   context: string;
   exprText: string;
   exprKind: string;
@@ -20,71 +21,119 @@ export interface UnkSpot {
   file: string;
 }
 
+export type AgentCandidateMode = "fair" | "gt";
+export type AgentCandidateSlot = "value" | "return";
+
+export interface AgentFeedbackEntry {
+  id: number;
+  type: string;
+  slot?: AgentCandidateSlot;
+}
+
+const VALUE_DECLARATION_KINDS = new Set([
+    "VariableDeclaration",
+    "Parameter",
+    "PropertyDeclaration",
+    "PropertySignature",
+]);
+
+const FUNCTION_DECLARATION_KINDS = new Set([
+    "FunctionDeclaration",
+    "FunctionExpression",
+    "ArrowFunction",
+    "MethodSignature",
+    "MethodDeclaration",
+]);
+
 export class Solver {
     graph = new TypeGraph();
     worklist: VarId[] = []
 
     constructor(private rule: RuleStore, private strategy: Strategy) { }
 
-    /** 收集图中节点未知信息，供 LLM Agent 推断 */
-    getUnkInfo(): UnkSpot[] {
+    private buildUnkSpot(id: VarId, slot: AgentCandidateSlot): UnkSpot {
+        const astFile = meta.file.get(id);
+        const marker = `ast${path.sep}`;
+        const markerIndex = astFile?.lastIndexOf(marker) ?? -1;
+        let relapath = "unknown_relapath";
+        let file = "unknown_file";
+
+        if (astFile && markerIndex >= 0) {
+            relapath = astFile
+                .slice(markerIndex + marker.length)
+                .replace(/\^/g, path.sep)
+                .replace(/\.ast\.json$/, "");
+            file = path.join(
+                astFile.slice(0, markerIndex).replace(/_output([/\\])$/, "$1"),
+                relapath,
+            );
+        }
+
+        return {
+            id,
+            slot,
+            context: meta.context.get(id) || "",
+            exprText: meta.text.get(id) || "",
+            exprKind: meta.v8Kind.get(id) || "",
+            morphKind: meta.kind.get(id) || "",
+            location: meta.offset.get(id) ?? -1,
+            pos: meta.pos.get(id) || null,
+            type: "unknown",
+            relapath,
+            file,
+        };
+    }
+
+    /**
+     * 收集供 LLM Agent 推断的候选。
+     *
+     * fair: 从源码声明元数据枚举，不读取 annotation 边，因此候选不受 GT 影响。
+     * gt: 保留历史图边算法，注入 GT 后新增的 annotation 边可以产生候选。
+     */
+    getUnkInfo(mode: AgentCandidateMode = "fair"): UnkSpot[] {
         const spots: UnkSpot[] = [];
-        for (const [id, _] of  this.graph.toEdges) {
-            if (!this.graph.nodes.has(id)  && this.graph.getFromEdges(id).size === 0) {
-                let file = meta.file.get(id);
-                let relapath = file ? file.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "") : "unknown_relapath";
-                file = file ? path.join(file.split("ast" + require("path").sep)[0].replace("_output", ""), file.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")) : "unknown_file";
-                spots.push({
-                    id: id,
-                    context: meta.context.get(id) || "",
-                    exprText: meta.text.get(id) || "",
-                    exprKind: meta.v8Kind.get(id) || "",
-                    morphKind: meta.kind.get(id) || "",
-                    location: meta.offset.get(id) || -1,
-                    pos: meta.pos.get(id) || null,
-                    type: "unknown",
-                    relapath: relapath,
-                    file: file,
-                });
+        if (mode === "gt") {
+            for (const [id] of this.graph.toEdges) {
+                if (!this.graph.nodes.has(id) && this.graph.getFromEdges(id).size === 0) {
+                    spots.push(this.buildUnkSpot(id, "value"));
+                }
+            }
+            return spots;
+        }
+
+        const seen = new Set<string>();
+        const addSpot = (id: VarId, slot: AgentCandidateSlot) => {
+            const key = `${id}:${slot}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            spots.push(this.buildUnkSpot(id, slot));
+        };
+
+        for (const [declarationId, kind] of meta.declKind) {
+            if (VALUE_DECLARATION_KINDS.has(kind)) {
+                const state = this.graph.nodes.get(declarationId);
+                if (!state || state.val === tNode.UNKNOWN) {
+                    addSpot(declarationId, "value");
+                }
+                continue;
+            }
+
+            if (!FUNCTION_DECLARATION_KINDS.has(kind)) continue;
+
+            const functionId = meta.funcBindMap.get(declarationId) ?? declarationId;
+            const state = this.graph.nodes.get(functionId) ?? this.graph.nodes.get(declarationId);
+            if (!state) continue;
+            const functionType = tNode.get(state.val);
+            if (functionType?.kind === "function" && functionType.returnType === tNode.UNKNOWN) {
+                addSpot(functionId, "return");
             }
         }
-        // for (const [id, kind] of meta.declKind) {
-        //     const entry: UnkSpot = {
-        //         id,
-        //         identifier: meta.text.get(id) || "",
-        //         kind,
-        //         offset: meta.offset.get(id) ?? -1,
-        //         pos: meta.pos.get(id) || null,
-        //         file: "",
-        //         context: meta.context.get(id) || "",
-        //     };
-        //     const fullPath = meta.file.get(id);
-        //     if (fullPath) {
-        //         const parts = fullPath.split("ast" + require("path").sep);
-        //         entry.file = path.join(parts[0] || "", parts[1] || "")
-        //             .replace(/\^/g, require("path").sep)
-        //             .replace(/\.ast\.json$/, "");
-        //     } else {
-        //         entry.file = "unknown";
-        //     }
-        //     if (kind === "Parameter") {
-        //         for (const [funcVarId, paramMap] of meta.funcParamMap) {
-        //             for (const param of paramMap.values()) {
-        //                 if (param === id) {
-        //                     entry.function = meta.funcName.get(funcVarId) || "";
-        //                     break;
-        //                 }
-        //             }
-        //             if (entry.function) break;
-        //         }
-        //     }
-        //     spots.push(entry);
-        // }
+
         return spots;
     }
 
     /** 将 LLM 推断的类型注入为 Fact 并继续求解（增量，不清空已求结果） */
-    injectFeedback(feedback: Array<{ id: number; type: string }>) {
+    injectFeedback(feedback: AgentFeedbackEntry[]) {
         const newFacts: Fact[] = injectFeedback(feedback);
 
         if (newFacts.length === 0) return;
@@ -238,4 +287,3 @@ export class Solver {
         console.log(`Done. Output written to ${outputDir}`);
     }
 }
-

@@ -4,6 +4,7 @@
 #   ./make.sh <目录>                   直接类型推断（默认仅第三步）
 #   ./make.sh <目录> --prepare         完整流程: 擦除 + AST + 推断
 #   ./make.sh <目录> --agent          确定性 + Agent LLM 推断
+#   ./make.sh <目录> --agent --agent-candidate-mode gt  使用 GT/历史候选模式
 #   ./make.sh <目录> --trace <varId>   追踪某个 varId 的类型变化
 #   ./make.sh <目录> -f <file>         反馈注入模式
 #   ./make.sh <目录> --js              JS 项目模式（跳过擦除阶段）
@@ -19,6 +20,7 @@ if [ $# -eq 0 ]; then
     echo "选项:"
     echo "  --prepare     预处理: 擦除类型标注 + 生成 AST（默认跳过，直接用已有结果）"
     echo "  --agent       Agent LLM 工具调用推断"
+    echo "  --agent-candidate-mode <fair|gt>  Agent 候选模式（默认 fair）"
     echo "  --trace <id>  追踪某个 varId 的类型变化，输出到 output/trace.json"
     echo "  -f <file>     从 feedback JSON 注入预推断的类型"
     echo ""
@@ -38,12 +40,21 @@ trace_id=""
 feedback=""
 prepare=false
 js_mode=false
+agent_candidate_mode="fair"
 shift
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --agent)
             mode="agent"
+            ;;
+        --agent-candidate-mode)
+            shift
+            if [ $# -eq 0 ]; then
+                echo "错误: --agent-candidate-mode 需要 fair 或 gt"
+                exit 1
+            fi
+            agent_candidate_mode="$1"
             ;;
         --prepare)
             prepare=true
@@ -127,7 +138,8 @@ case "$mode" in
         node --max-old-space-size=40960 -r ts-node/register ast2type.ts \
             -i "$input_dir" \
             "${gt_arg[@]}" \
-            --agent
+            --agent \
+            --agent-candidate-mode "$agent_candidate_mode"
         ;;
     trace)
         node --max-old-space-size=40960 -r ts-node/register ast2type.ts \

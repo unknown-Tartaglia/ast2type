@@ -4,7 +4,11 @@ import { Command } from "commander";
 import { writeJsonStream } from "./code2ast";
 import { FactStore, Emitter, VarId, Fact, TypeId } from "./ast2type/fact"
 import { MetaStore } from "./ast2type/meta"
-import { Solver } from "./ast2type/solver";
+import {
+  Solver,
+  type AgentCandidateMode,
+  type AgentFeedbackEntry,
+} from "./ast2type/solver";
 import { tNodeStore } from "./ast2type/nType";
 import { DeterminantStrategy } from "./ast2type/strategy";
 import { RuleStore } from "./ast2type/rule";
@@ -18,6 +22,8 @@ program
   .option("-g, --groundtruth <path>", "Path to ground truth JSON for annotation injection")
   .option("-f, --feedback <path>", "Path to feedback JSON for type injection (LLM-inferred types)")
   .option("--agent", "Enable LLM agent to infer unknown declaration types in-loop")
+  .option("--agent-feedback <path>", "Replay cached Agent feedback at the in-loop injection stage")
+  .option("--agent-candidate-mode <mode>", "Agent candidates: fair (GT-independent declarations) or gt (legacy graph candidates)", "fair")
   .option("--sourcedir <dir>", "Erased source directory for agent (auto-derived if omitted)")
   .option("--api-key <key>", "API key for agent (or set DEEPSEEK_API_KEY env var)")
   .option("--trace <varId>", "Trace type changes for a specific varId, output to trace.json")
@@ -29,6 +35,12 @@ const outputDir = options.output ? path.resolve(options.output) : path.resolve("
 const groundtruthOption: string | undefined = options.groundtruth ? path.resolve(options.groundtruth) : undefined;
 const feedbackOption: string | undefined = options.feedback ? path.resolve(options.feedback) : undefined;
 const agentMode: boolean = !!options.agent;
+const agentFeedbackOption: string | undefined = options.agentFeedback ? path.resolve(options.agentFeedback) : undefined;
+const agentCandidateModeRaw: string = options.agentCandidateMode;
+if (agentCandidateModeRaw !== "fair" && agentCandidateModeRaw !== "gt") {
+  program.error(`Invalid --agent-candidate-mode "${agentCandidateModeRaw}"; expected fair or gt`);
+}
+const agentCandidateMode = agentCandidateModeRaw as AgentCandidateMode;
 const agentApiKey: string = options.apiKey || process.env.DEEPSEEK_API_KEY || "";
 const sourcedirOption: string | undefined = options.sourcedir ? path.resolve(options.sourcedir) : undefined;
 const traceTarget: number | null = options.trace ? parseInt(options.trace, 10) : null;
@@ -568,6 +580,7 @@ function secondPass(filePath: string, node: AstNode) {
         if (!propIdNode || propIdNode.varId === undefined || !propIdNode.text) return;
 
         varBindings.set(propIdNode.text, propIdNode.varId!);
+        meta.declKind.set(propIdNode.varId, "PropertySignature");
 
         const index = node.children?.findIndex(n => n.kind === "ColonToken");
         // 处理类型注解
@@ -644,6 +657,7 @@ function secondPass(filePath: string, node: AstNode) {
 
         const propIdNode = findNodesByKind(node, "Identifier")[0];
         if (!propIdNode || propIdNode.varId === undefined) return;
+        meta.declKind.set(propIdNode.varId, "PropertyDeclaration");
 
         if (propIdNode.text) {
           meta.propName.set(propIdNode.varId!, propIdNode.text);
@@ -1643,8 +1657,8 @@ function injectGroundTruth(groundtruthPath: string) {
   console.log(`Ground truth injected: ${injectedCount} annotations (${missedCount} missed)`);
 }
 
-// 从 feedback JSON 注入 LLM 推断类型：创建合成类型节点，通过 flow 边绑定到目标标识符
-type FeedbackEntry = { id: number; type: string };
+// 从 feedback JSON 注入 LLM 推断类型：value 走类型流，return 更新函数返回槽。
+type FeedbackEntry = AgentFeedbackEntry;
 function injectFeedback(feedback: FeedbackEntry[]) {
   let injectedCount = 0;
   let missedCount = 0;
@@ -1652,6 +1666,12 @@ function injectFeedback(feedback: FeedbackEntry[]) {
 
   for (const entry of feedback) {
     const targetVarId = entry.id;
+    const slot = entry.slot ?? "value";
+    if (slot !== "value" && slot !== "return") {
+      console.error(`Feedback: invalid slot "${String(entry.slot)}" for id ${entry.id}`);
+      missedCount++;
+      continue;
+    }
     const typeId = tNode.parseTypeString(entry.type);
     if (typeId === null) {
       console.error(`Feedback: could not parse type "${entry.type}" for id ${entry.id}`);
@@ -1664,10 +1684,13 @@ function injectFeedback(feedback: FeedbackEntry[]) {
 
     // 分配原始类型到合成节点
     newFacts.push({ kind: "AllocPrimitive", varId: syntheticVarId, typeId });
-    // emit.allocPrimitive(syntheticVarId, typeId);
-    // 通过 flow 边将类型绑定到目标标识符（solver 通过 sameType 边传播）
-    newFacts.push({ kind: "Flow", from: syntheticVarId, to: targetVarId, reason: "external feedback" });
-    // emit.flow(syntheticVarId, targetVarId, "external feedback");
+    if (slot === "return") {
+      // 返回槽需要沿 return 边更新函数签名，不能把返回类型 Flow 到整个函数节点。
+      newFacts.push({ kind: "ReturnStmt", funcVarId: targetVarId, returnVarId: syntheticVarId });
+    } else {
+      // 通过 flow 边将类型绑定到目标标识符（solver 通过 sameType 边传播）
+      newFacts.push({ kind: "Flow", from: syntheticVarId, to: targetVarId, reason: "external feedback" });
+    }
     injectedCount++;
   }
 
@@ -1716,14 +1739,28 @@ async function main() {
   solver.output(false);
 
   // Agent 模式：收集未知声明 → LLM 推断 → 回填 → 继续求解
-  if (agentMode) {
-    if (!agentApiKey) {
-      console.warn("Agent mode enabled but no API key set (use --api-key or DEEPSEEK_API_KEY). Skipping.");
+  if (agentMode || agentFeedbackOption) {
+    let feedback: FeedbackEntry[] = [];
+    if (agentFeedbackOption) {
+      if (!fs.existsSync(agentFeedbackOption)) {
+        console.warn(`Agent feedback file not found: ${agentFeedbackOption}, skipping injection`);
+      } else {
+        feedback = JSON.parse(fs.readFileSync(agentFeedbackOption, "utf8"));
+        console.log(`[agent] 从缓存读取 ${feedback.length} 条推断`);
+      }
     } else {
-      const unkSpots = solver.getUnkInfo();
-      console.log(`[agent] 收集 ${unkSpots.length} 个未知声明节点`);
+      const unkSpots = solver.getUnkInfo(agentCandidateMode);
+      const candidateOut = path.join(outputDir, "agent-candidates.json");
+      writeJsonStream(candidateOut, {
+        mode: agentCandidateMode,
+        candidates: unkSpots,
+      });
+      console.log(`[agent] 候选模式: ${agentCandidateMode}`);
+      console.log(`[agent] 收集 ${unkSpots.length} 个未知声明槽，写入 ${candidateOut}`);
 
-      if (unkSpots.length > 0) {
+      if (!agentApiKey) {
+        console.warn("Agent mode enabled but no API key set (use --api-key or DEEPSEEK_API_KEY). Skipping inference.");
+      } else if (unkSpots.length > 0) {
         // 推导源码目录
         const sourceDir = sourcedirOption || (() => {
           // 约定：input 是 ${dir}_erase_output，则源码在 ${dir}_erase
@@ -1732,24 +1769,30 @@ async function main() {
             ? path.join(path.dirname(inputDir), last.replace(/_output$/, ""))
             : inputDir;
         })();
+        const sourceSpots = unkSpots.map(spot => spot.relapath === "unknown_relapath"
+          ? spot
+          : { ...spot, file: path.join(sourceDir, spot.relapath) });
+        console.log(`[agent] 源码目录: ${sourceDir}`);
 
         const { inferTypes } = await import("./agent/infer");
-        const feedback = await inferTypes(
-          unkSpots,
+        feedback = await inferTypes(
+          sourceSpots,
           agentApiKey,
           30,
           (file, done, total) => {
             if (done >= total) {
               console.log(`[agent] ${file}: ${done}/${total}`);
             }
-          }
+          },
+          20,
+          path.join(outputDir, "inferinfo.json"),
         );
 
-        if (feedback.length > 0) {
-          console.log(`[agent] LLM 推断 ${feedback.length} 条，回填并继续求解...`);
-          solver.injectFeedback(feedback);
-        }
       }
+    }
+    if (feedback.length > 0) {
+      console.log(`[agent] 推断 ${feedback.length} 条，回填并继续求解...`);
+      solver.injectFeedback(feedback);
     }
   }
 
