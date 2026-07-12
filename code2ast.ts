@@ -48,7 +48,11 @@ const SDKRoots = [
 ];
 let srcFiles : string[] = [];
 const globalImportMap = new Map<string, string>();
-const suffixes = ["", ".ts", ".js", ".mjs", ".ets", ".tsx", ".d.ts", ".d.ets", ".android.bundle"];
+const suffixes = [
+  "", ".ts", ".tsx", ".mts", ".cts", ".ets",
+  ".js", ".mjs",
+  ".d.ts", ".d.mts", ".d.cts", ".d.ets", ".android.bundle",
+];
 const visitedFiles = new Set<string>();
 const position = {
   "start": {
@@ -743,9 +747,11 @@ function collectSourceFiles(dir: string): string[] {
   let files: string[] = [];
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
+    if (entry.isDirectory() && entry.name !== "node_modules" && entry.name !== ".git") {
       files = files.concat(collectSourceFiles(fullPath));
-    } else if (jsOnly ? entry.name.match(/\.(js|mjs)$/) : entry.name.match(/\.(ts|tsx|js|mjs|ets|bundle)$/)) {
+    } else if (jsOnly
+      ? entry.name.match(/\.(js|mjs)$/)
+      : entry.name.match(/\.(ts|tsx|mts|cts|js|mjs|ets|bundle)$/)) {
       files.push(fullPath);
     }
   }

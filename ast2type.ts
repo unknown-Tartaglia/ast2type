@@ -1808,7 +1808,8 @@ function getAstFiles(dir: string): string[] {
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) files = files.concat(getAstFiles(fullPath));
-    else if (entry.name.endsWith(".ast.json") && !entry.name.includes(".d.ts")) files.push(fullPath);
+    else if (entry.name.endsWith(".ast.json")
+      && !/\.d\.(ts|mts|cts|ets)\.ast\.json$/.test(entry.name)) files.push(fullPath);
   }
   return files;
 }
