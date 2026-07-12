@@ -19,7 +19,8 @@ The suite currently covers:
 - conservative ground-truth type parsing;
 - JavaScript-only AST input isolation;
 - inferred type sanitization and annotation weaving;
-- ESM and CommonJS export-target selection.
+- ESM and CommonJS export-target selection;
+- raw JavaScript-to-TypeScript pipeline conversion and failure isolation.
 
 Tests use temporary project directories and do not require generated experiment
 outputs. Known limitations of name-based export selection are documented in
