@@ -1673,8 +1673,8 @@ function injectFeedback(feedback: FeedbackEntry[]) {
       continue;
     }
     const typeId = tNode.parseTypeString(entry.type);
-    if (typeId === null) {
-      console.error(`Feedback: could not parse type "${entry.type}" for id ${entry.id}`);
+    if (typeId === null || typeId === tNode.UNKNOWN) {
+      console.error(`Feedback: type "${entry.type}" is unknown or unsupported for id ${entry.id}`);
       missedCount++;
       continue;
     }

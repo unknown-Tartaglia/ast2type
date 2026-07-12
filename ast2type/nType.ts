@@ -1,5 +1,6 @@
 import { DEDUCE_ONLY_WHEN_ALL_KNOWNN, LOG_TYPE_FLOW, LOG_TYPENODE, LOG_TYPENODE_VERBOSE, meta, solver, tNode } from "../ast2type";
 import { VarId } from "./fact";
+import * as ts from "typescript";
 
 export class tNodeStore {
     private typeNodes: nType[] = [];
@@ -382,111 +383,255 @@ export class tNodeStore {
         }
     }
 
-    /** 将 ground truth 类型字符串解析为 TypeId */
+    /** 将 ground truth/feedback 类型转换为内部类型；无法完整表达时返回 UNKNOWN。 */
     parseTypeString(raw: string): TypeId | null {
-        const s = raw.trim();
-        if (!s) return null;
-
-        // 空元组类型 [] → unknown[]
-        if (s === "[]") return this.newTypeNode({ kind: "array", elementType: this.UNKNOWN });
-
-        // 1. 基础类型
-        const primMap: Record<string, number> = {
-            number: this.NUMBER, string: this.STRING, boolean: this.BOOLEAN,
-            void: this.VOID, any: this.ANY, undefined: this.UNDEFINED,
-            unknown: this.UNKNOWN,
-        };
-        if (primMap[s] !== undefined) return primMap[s];
-
-        // 2. 字面量（内部不能含同种引号，避免吃进 'a' | 'b'）
-        if (/^'[^']*'$/.test(s) || /^"[^"]*"$/.test(s)) {
-            return this.newTypeNode({ kind: "literal", value: s.slice(1, -1) });
-        }
-        if (/^-?\d+(\.\d+)?$/.test(s)) {
-            return this.newTypeNode({ kind: "literal", value: Number(s) });
-        }
-        if (s === "true") return this.newTypeNode({ kind: "literal", value: true });
-        if (s === "false") return this.newTypeNode({ kind: "literal", value: false });
-        if (s === "null") return this.newTypeNode({ kind: "literal", value: null });
-
-        // 3. typeof X → 在 JS 擦除后等价于 X 本身
-        if (s.startsWith("typeof ")) {
-            return this.parseTypeString(s.slice(7).trim());
+        // TypeScript 没有独立解析 TypeNode 的公开入口，放进返回类型可复用完整类型语法。
+        // 同时要求文件中只有这一条声明，避免 raw 用分号追加其他语句后仍被部分接受。
+        const sourceFile = ts.createSourceFile(
+            "__ast2type_type.ts",
+            `declare function __Ast2TypeInput(): ${raw};`,
+            ts.ScriptTarget.Latest,
+            true,
+            ts.ScriptKind.TS,
+        );
+        const diagnostics = (sourceFile as ts.SourceFile & {
+            parseDiagnostics?: readonly ts.Diagnostic[];
+        }).parseDiagnostics ?? [];
+        const statements = sourceFile.statements.filter(statement => !ts.isEmptyStatement(statement));
+        if (diagnostics.length > 0
+            || statements.length !== 1
+            || !ts.isFunctionDeclaration(statements[0])
+            || statements[0].type === undefined) {
+            return this.UNKNOWN;
         }
 
-        // 4. 数组: T[]
-        if (s.endsWith("[]")) {
-            const elem = this.parseTypeString(s.slice(0, -2));
-            if (elem === null) return null;
-            return this.newTypeNode({ kind: "array", elementType: elem });
+        return this._fromTypeScriptType(statements[0].type) ?? this.UNKNOWN;
+    }
+
+    /** null 表示内部模型无法无损表达；真正的 TypeScript unknown 返回 UNKNOWN TypeId。 */
+    private _fromTypeScriptType(node: ts.TypeNode): TypeId | null {
+        switch (node.kind) {
+            case ts.SyntaxKind.AnyKeyword: return this.ANY;
+            case ts.SyntaxKind.UnknownKeyword: return this.UNKNOWN;
+            case ts.SyntaxKind.NumberKeyword: return this.NUMBER;
+            case ts.SyntaxKind.StringKeyword: return this.STRING;
+            case ts.SyntaxKind.BooleanKeyword: return this.BOOLEAN;
+            case ts.SyntaxKind.UndefinedKeyword: return this.UNDEFINED;
+            case ts.SyntaxKind.VoidKeyword: return this.VOID;
+            case ts.SyntaxKind.NeverKeyword: return null;
+            case ts.SyntaxKind.ObjectKeyword:
+                return this.newTypeNode({
+                    kind: "object", name: "object", id: ++this._synthObjId, properties: {},
+                });
         }
 
-        // 4. 函数: (...) => T
-        const funcMatch = s.match(/^\(([\s\S]*)\)\s*=>\s*(.+)$/);
-        if (funcMatch) {
-            const paramsStr = funcMatch[1].trim();
-            const retType = this.parseTypeString(funcMatch[2].trim());
-            if (retType === null) return null;
-            const paramEntries: Record<number, { id: number; type: number }> = {};
-            if (paramsStr) {
-                const parts = this._splitTopLevel(paramsStr, ",");
-                for (let i = 0; i < parts.length; i++) {
-                    const p = parts[i].trim();
-                    const colonIdx = p.indexOf(":");
-                    const paramTypeId = colonIdx >= 0
-                        ? (this.parseTypeString(p.slice(colonIdx + 1).trim()) ?? this.ANY)
-                        : (this.parseTypeString(p) ?? this.ANY);
-                    paramEntries[i] = { id: -(++this._synthObjId), type: paramTypeId };
+        if (ts.isParenthesizedTypeNode(node)) return this._fromTypeScriptType(node.type);
+
+        if (ts.isLiteralTypeNode(node)) {
+            const literal = node.literal;
+            if (ts.isStringLiteral(literal)) {
+                return this.newTypeNode({ kind: "literal", value: literal.text });
+            }
+            if (ts.isNumericLiteral(literal)) {
+                return this.newTypeNode({ kind: "literal", value: Number(literal.text) });
+            }
+            if (literal.kind === ts.SyntaxKind.TrueKeyword) {
+                return this.newTypeNode({ kind: "literal", value: true });
+            }
+            if (literal.kind === ts.SyntaxKind.FalseKeyword) {
+                return this.newTypeNode({ kind: "literal", value: false });
+            }
+            if (literal.kind === ts.SyntaxKind.NullKeyword) {
+                return this.newTypeNode({ kind: "literal", value: null });
+            }
+            if (ts.isPrefixUnaryExpression(literal)
+                && literal.operator === ts.SyntaxKind.MinusToken
+                && ts.isNumericLiteral(literal.operand)) {
+                return this.newTypeNode({ kind: "literal", value: -Number(literal.operand.text) });
+            }
+            return null;
+        }
+
+        if (ts.isTypePredicateNode(node)) {
+            // 内部模型不记录谓词目标，但其运行时返回值仍可准确表示为 boolean。
+            return node.assertsModifier ? null : this.BOOLEAN;
+        }
+
+        if (ts.isArrayTypeNode(node)) {
+            const elementType = this._fromTypeScriptType(node.elementType);
+            return elementType === null
+                ? null
+                : this.newTypeNode({ kind: "array", elementType });
+        }
+
+        if (ts.isTupleTypeNode(node)) {
+            // 内部没有 tuple 节点，保守降为“所有元素类型的数组”；可选元素补 undefined。
+            const elementTypes: TypeId[] = [];
+            for (const rawElement of node.elements) {
+                let element: ts.TypeNode = rawElement;
+                let optional = false;
+                let rest = false;
+                if (ts.isNamedTupleMember(element)) {
+                    optional = element.questionToken !== undefined;
+                    rest = element.dotDotDotToken !== undefined;
+                    element = element.type;
+                } else if (ts.isOptionalTypeNode(element)) {
+                    optional = true;
+                    element = element.type;
+                } else if (ts.isRestTypeNode(element)) {
+                    rest = true;
+                    element = element.type;
                 }
+
+                let elementType: TypeId | null;
+                if (rest && ts.isArrayTypeNode(element)) {
+                    elementType = this._fromTypeScriptType(element.elementType);
+                } else {
+                    elementType = this._fromTypeScriptType(element);
+                }
+                if (elementType === null) return null;
+                elementTypes.push(elementType);
+                if (optional) elementTypes.push(this.UNDEFINED);
+            }
+            const elementType = this._unionType(elementTypes);
+            return this.newTypeNode({ kind: "array", elementType });
+        }
+
+        if (ts.isFunctionTypeNode(node)) {
+            return this._signatureType(node.parameters, node.type, node.typeParameters);
+        }
+
+        // 当前内部模型无法区分普通函数和构造器，不能把构造器误当成实例或普通函数。
+        if (ts.isConstructorTypeNode(node)) return null;
+
+        if (ts.isUnionTypeNode(node)) {
+            const types: TypeId[] = [];
+            for (const member of node.types) {
+                const type = this._fromTypeScriptType(member);
+                // 不丢弃无法表达的分支，否则会把 GT 缩窄成一个错误但可比较的类型。
+                if (type === null) return null;
+                types.push(type);
+            }
+            return this._unionType(types);
+        }
+
+        if (ts.isTypeLiteralNode(node)) {
+            const properties: Record<string, TypeId> = {};
+            for (const member of node.members) {
+                if (ts.isPropertySignature(member)) {
+                    const name = member.name ? this._propertyName(member.name) : null;
+                    // 重复成员可能是重载；单值属性表无法无损表示。
+                    if (name === null || Object.prototype.hasOwnProperty.call(properties, name)) {
+                        return null;
+                    }
+                    let type = member.type ? this._fromTypeScriptType(member.type) : this.ANY;
+                    if (type === null) return null;
+                    if (member.questionToken) type = this._unionType([type, this.UNDEFINED]);
+                    properties[name] = type;
+                    continue;
+                }
+                if (ts.isMethodSignature(member)) {
+                    const name = member.name ? this._propertyName(member.name) : null;
+                    if (name === null || Object.prototype.hasOwnProperty.call(properties, name)) {
+                        return null;
+                    }
+                    let type = this._signatureType(
+                        member.parameters,
+                        member.type,
+                        member.typeParameters,
+                    );
+                    if (type === null) return null;
+                    if (member.questionToken) type = this._unionType([type, this.UNDEFINED]);
+                    properties[name] = type;
+                    continue;
+                }
+                return null;
             }
             return this.newTypeNode({
-                kind: "function", name: "", id: ++this._synthObjId,
-                param: paramEntries, returnType: retType,
+                kind: "object", name: "", id: ++this._synthObjId, properties,
             });
         }
 
-        // 5. 联合: A | B (顶层)
-        const unionParts = this._splitTopLevel(s, "|");
-        if (unionParts.length > 1) {
-            const types = unionParts
-                .map(p => this.parseTypeString(p.trim()))
-                .filter((t): t is number => t !== null);
-            if (types.length === 0) return null;
-            if (types.length === 1) return types[0];
-            return this.newTypeNode({ kind: "union", types });
-        }
-
-        // 6. 泛型: Name<T> — 只取名字,参数不深入
-        const genMatch = s.match(/^(.+?)<.+>$/);
-        if (genMatch) {
+        if (ts.isTypeReferenceNode(node)) {
+            const name = this._entityName(node.typeName);
+            if (name === null) return null;
+            const typeArguments = node.typeArguments ?? [];
+            // 数组是内部唯一能保留类型实参语义的泛型；其余泛型不能只擦掉实参。
+            if ((name === "Array" || name === "ReadonlyArray") && typeArguments.length === 1) {
+                const elementType = this._fromTypeScriptType(typeArguments[0]);
+                return elementType === null
+                    ? null
+                    : this.newTypeNode({ kind: "array", elementType });
+            }
+            if (typeArguments.length > 0) return null;
             return this.newTypeNode({
-                kind: "object", name: genMatch[1].trim(),
-                id: ++this._synthObjId, properties: {},
+                kind: "object", name, id: ++this._synthObjId, properties: {},
             });
         }
 
-        // 7. 命名类型 — 当作 object
+        if (ts.isTypeOperatorNode(node)) {
+            // createSourceFile 不做 grammar checking；readonly string 也会产生 AST，需显式拒绝。
+            if (node.operator !== ts.SyntaxKind.ReadonlyKeyword
+                || (!ts.isArrayTypeNode(node.type) && !ts.isTupleTypeNode(node.type))) {
+                return null;
+            }
+            return this._fromTypeScriptType(node.type);
+        }
+
+        return null;
+    }
+
+    private _signatureType(
+        parameters: readonly ts.ParameterDeclaration[],
+        returnTypeNode: ts.TypeNode | undefined,
+        typeParameters: readonly ts.TypeParameterDeclaration[] | undefined,
+    ): TypeId | null {
+        // 内部函数类型只有固定位置参数，不能表达泛型、默认值、receiver 或 rest 语义。
+        if (typeParameters && typeParameters.length > 0) return null;
+        const returnType = returnTypeNode ? this._fromTypeScriptType(returnTypeNode) : this.ANY;
+        if (returnType === null) return null;
+        const params: Record<number, { id: number; type: number }> = {};
+        for (let index = 0; index < parameters.length; index++) {
+            const parameter = parameters[index];
+            if (parameter.initializer
+                || parameter.dotDotDotToken
+                || (parameter.modifiers && parameter.modifiers.length > 0)
+                || (ts.isIdentifier(parameter.name) && parameter.name.text === "this")) {
+                return null;
+            }
+            let type = parameter.type ? this._fromTypeScriptType(parameter.type) : this.ANY;
+            if (type === null) return null;
+            if (parameter.questionToken) type = this._unionType([type, this.UNDEFINED]);
+            params[index] = { id: -(++this._synthObjId), type };
+        }
         return this.newTypeNode({
-            kind: "object", name: s, id: ++this._synthObjId, properties: {},
+            kind: "function", name: "", id: ++this._synthObjId,
+            param: params, returnType,
         });
     }
 
-    /** 按分隔符分割，忽略括号/尖括号内的分隔符 */
-    private _splitTopLevel(s: string, sep: string): string[] {
-        const parts: string[] = [];
-        let depth = 0, start = 0;
-        for (let i = 0; i < s.length; i++) {
-            const ch = s[i];
-            if (ch === "(" || ch === "<" || ch === "{") depth++;
-            else if (ch === ")" || ch === ">" || ch === "}") depth--;
-            else if (depth === 0 && s.slice(i, i + sep.length) === sep) {
-                parts.push(s.slice(start, i));
-                start = i + sep.length;
-                if (sep.length > 1) i += sep.length - 1;
-            }
+    private _unionType(types: TypeId[]): TypeId {
+        // unknown/any 在 TS 联合中的支配关系不能靠丢弃成员近似。
+        if (types.length === 0 || types.includes(this.UNKNOWN)) return this.UNKNOWN;
+        if (types.includes(this.ANY)) return this.ANY;
+        const uniqueTypes = [...new Set(types)];
+        return uniqueTypes.length === 1
+            ? uniqueTypes[0]
+            : this.newTypeNode({ kind: "union", types: uniqueTypes });
+    }
+
+    private _entityName(name: ts.EntityName): string | null {
+        if (ts.isIdentifier(name)) return name.text;
+        const left = this._entityName(name.left);
+        return left === null ? null : `${left}.${name.right.text}`;
+    }
+
+    private _propertyName(name: ts.PropertyName): string | null {
+        if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) {
+            // The internal property maps use ordinary objects, where this key has setter semantics.
+            return name.text === "__proto__" ? null : name.text;
         }
-        parts.push(s.slice(start));
-        return parts;
+        return null;
     }
 }
 
