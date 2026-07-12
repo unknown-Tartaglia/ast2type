@@ -7,16 +7,19 @@ import JSON5 from "json5";
 const program = new Command();
 program
   .option("-i, --input <inputDir>", "Input source code directory or ArkTS project root")
-  .option("-o, --output <outputDir>", "Output AST directory (default: ./output/ast)");
+  .option("-o, --output <outputDir>", "Output AST directory (default: ./output/ast)")
+  .option("--js-only", "Only collect JavaScript sources; exclude TypeScript declarations");
 
 // 仅在作为主脚本运行时解析命令行参数，被 import 时跳过
 let userInputDir: string;
 let outputDir: string;
+let jsOnly = false;
 if (require.main === module) {
   program.parse(process.argv);
   const options = program.opts();
   userInputDir = options.input ? path.resolve(options.input) : path.resolve("./");
   outputDir = options.output ? path.resolve(options.output + "/ast") : path.resolve(userInputDir.replace(/[\\\/]+$/, "") + "_output/ast");
+  jsOnly = Boolean(options.jsOnly);
 } else {
   userInputDir = path.resolve("./");
   outputDir = path.resolve("./output/ast");
@@ -742,7 +745,7 @@ function collectSourceFiles(dir: string): string[] {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       files = files.concat(collectSourceFiles(fullPath));
-    } else if (entry.name.match(/\.(ts|tsx|js|mjs|ets|bundle)$/)) {
+    } else if (jsOnly ? entry.name.match(/\.(js|mjs)$/) : entry.name.match(/\.(ts|tsx|js|mjs|ets|bundle)$/)) {
       files.push(fullPath);
     }
   }

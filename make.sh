@@ -115,7 +115,12 @@ if [ "$prepare" = true ]; then
 
     # 第二阶段: 生成 AST
     echo "=== 生成 AST ==="
-    node --max-old-space-size=40960 -r ts-node/register code2ast.ts -i "$ast_input"
+    ast_args=(-i "$ast_input")
+    if [ "$js_mode" = true ]; then
+        # Keep TypeScript declarations from leaking reference types into JS inference.
+        ast_args+=(--js-only)
+    fi
+    node --max-old-space-size=40960 -r ts-node/register code2ast.ts "${ast_args[@]}"
 else
     # 非 prepare 模式：检查输入目录是否存在
     if [ ! -d "$input_dir" ]; then
