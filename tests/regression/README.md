@@ -21,7 +21,8 @@ The suite currently covers:
 - inferred type sanitization and annotation weaving;
 - ESM and CommonJS export-target selection;
 - raw JavaScript-to-TypeScript pipeline conversion and failure isolation;
-- TypeScript annotation erasure, graph-based restoration, and inference reuse isolation.
+- TypeScript annotation erasure, graph-based restoration, and inference reuse isolation;
+- shared TypeScript compilation inputs, statuses, and declaration-emission rules.
 
 Tests use temporary project directories and do not require generated experiment
 outputs. Known limitations of name-based export selection are documented in
