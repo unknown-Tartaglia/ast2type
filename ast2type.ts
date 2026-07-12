@@ -133,6 +133,40 @@ function findNodesByKind(root: AstNode, kind: string): AstNode[] {
   return found;
 }
 
+const functionLikeKinds = new Set([
+  "FunctionDeclaration",
+  "MethodDeclaration",
+  "ArrowFunction",
+  "FunctionExpression",
+  "Constructor",
+  "GetAccessor",
+  "SetAccessor",
+]);
+
+function hasOwnReturnStatement(root: AstNode): boolean {
+  function walk(node: AstNode): boolean {
+    if (node !== root && functionLikeKinds.has(node.kind)) return false;
+    if (node.kind === "ReturnStatement") return true;
+    return node.children?.some(walk) ?? false;
+  }
+
+  return walk(root);
+}
+
+function findFunctionInitializer(node: AstNode | undefined): AstNode | undefined {
+  let current = node;
+  while (current?.kind === "ParenthesizedExpression") {
+    current = current.children?.find(child =>
+      child.kind === "ParenthesizedExpression"
+      || child.kind === "ArrowFunction"
+      || child.kind === "FunctionExpression"
+    );
+  }
+  return current?.kind === "ArrowFunction" || current?.kind === "FunctionExpression"
+    ? current
+    : undefined;
+}
+
 function findParentByKind(root: AstNode | undefined, kind: string): AstNode | undefined {
   if (!root) return undefined;
   if (root.kind === kind) return root;
@@ -328,6 +362,29 @@ function secondPass(filePath: string, node: AstNode) {
         }
       }
     },
+    ArrowFunction(node) {
+      meta.v8Kind.set(node.varId!, "FunctionLiteral");
+      emit.allocFunction(node.varId!, node.varId!);
+      meta.declKind.set(node.varId!, "ArrowFunction");
+
+      const colonIndex = node.children?.findIndex(n => n.kind === "ColonToken");
+      if (colonIndex !== undefined && colonIndex !== -1) {
+        const typeNode = node.children?.[colonIndex + 1];
+        if (typeNode?.varId !== undefined) {
+          emit.returnAnnot(node.varId!, typeNode.varId);
+        }
+      } else if (node.children?.some(n => n.kind === "Block")) {
+        if (!hasOwnReturnStatement(node)) {
+          emit.returnVoid(node.varId!);
+        }
+      } else {
+        const arrowIndex = node.children?.findIndex(n => n.kind === "EqualsGreaterThanToken") ?? -1;
+        const expression = arrowIndex >= 0 ? node.children?.[arrowIndex + 1] : undefined;
+        if (expression?.varId !== undefined) {
+          emit.returnStmt(node.varId!, expression.varId);
+        }
+      }
+    },
     // 变量声明
     VariableDeclaration(node) {
       // example: id [: type] [= x]
@@ -360,6 +417,11 @@ function secondPass(filePath: string, node: AstNode) {
         meta.v8Kind.set(left.varId!, "VariableDeclaration");
         meta.offset.set(node.varId!, right?.offset!);
         if (left.varId !== undefined && right?.varId !== undefined) {
+          const functionInitializer = findFunctionInitializer(right);
+          if (functionInitializer?.varId !== undefined) {
+            meta.funcName.set(functionInitializer.varId, left.text!);
+            meta.funcBindMap.set(left.varId, functionInitializer.varId);
+          }
           emit.flow(right.varId!, left.varId!, `variable ${left.text!} = ${right.text!}`);
         }
       }
@@ -409,6 +471,10 @@ function secondPass(filePath: string, node: AstNode) {
         paramBindings.set(paramIdNode.text!, paramIdNode.varId!);
         meta.paramName.set(paramIdNode.varId!, paramIdNode.text!);
         meta.declKind.set(paramIdNode.varId!, "Parameter");
+
+        if (node.children.some(child => child.kind === "DotDotDotToken")) {
+          emit.allocArray(paramIdNode.varId!);
+        }
 
         // 处理类型注解
         const colonIndex = node.children?.findIndex(n => n.kind === "ColonToken");
@@ -1234,24 +1300,6 @@ function secondPass(filePath: string, node: AstNode) {
           console.error("Scope stack underflow: too many closing braces");
         }
       }
-      // TODO: 其余操作
-      if (node.children) {
-        emit.allocFunction(node.varId!, node.varId!);
-        meta.declKind.set(node.varId!, "ArrowFunction");
-        const index = node.children?.findIndex(n => n.kind === "ColonToken");
-        // 类型注解
-        if (index !== undefined && index !== -1) {
-          const typeNode = node.children?.[index + 1];
-          if (typeNode && typeNode.varId) {
-            emit.returnAnnot(node.varId!, typeNode.varId!);
-          }
-        }
-        else if (findNodesByKind(node, "ReturnStatement").length === 0) {
-          // 如果没有返回类型注解并且没有Return语句
-          emit.returnVoid(node.varId!);
-        }
-      }
-
     },
     // => 操作符
     EqualsGreaterThanToken(node) {

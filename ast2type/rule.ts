@@ -319,12 +319,21 @@ class ReturnAnnotRule implements Rule {
 
 class AllocFunctionRule implements Rule {
     apply(fact: AllocFunctionFact): GraphEffect[] {
-        // 创建初始函数类型，参数为空，返回类型为UNKNOWN
+        // 保留声明参数槽，参数与返回类型先设为 UNKNOWN。
+        const functionName = meta.funcName.get(fact.varId)
+            ?? (fact.bind !== undefined && fact.bind !== fact.varId
+                ? meta.text.get(fact.bind)
+                : undefined)
+            ?? `func_${fact.varId}`;
+        const params: Record<number, {id: number; type: number}> = {};
+        for (const [index, paramId] of meta.funcParamMap.get(fact.varId) ?? []) {
+            params[index] = { id: paramId, type: tNode.UNKNOWN };
+        }
         const funcType = tNode.newTypeNode({
             kind: "function",
-            name: meta.funcName.get(fact.varId) ?? `func_${fact.varId}`,
+            name: functionName,
             id: fact.varId,
-            param: {} as Record<number, {id: number; type: number}>,
+            param: params,
             returnType: tNode.UNKNOWN
         });
         const effects: GraphEffect[] = [{ kind: "genType", node: fact.varId, type: funcType }]
