@@ -23,11 +23,11 @@ if [ $# -eq 0 ]; then
     echo "  -f <file>     从 feedback JSON 注入预推断的类型"
     echo ""
     echo "示例:"
-    echo "  $0 tests/personal_erase              # 只用已有 _erase_output 跑推断"
-    echo "  $0 tests/personal --prepare          # 完整流程"
-    echo "  $0 tests/personal --prepare --agent  # 完整 + Agent"
-    echo "  $0 tests/personal_erase --trace 108  # 追踪"
-    echo "  $0 tests/personal_erase -f output/inferinfo.json"
+    echo "  $0 tests/ts/personal_erase              # 只用已有 _erase_output 跑推断"
+    echo "  $0 tests/ts/personal --prepare          # 完整流程"
+    echo "  $0 tests/ts/personal --prepare --agent  # 完整 + Agent"
+    echo "  $0 tests/ts/personal_erase --trace 108  # 追踪"
+    echo "  $0 tests/ts/personal_erase -f output/inferinfo.json"
     exit 1
 fi
 
