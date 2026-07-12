@@ -37,23 +37,18 @@ ${list}
 [{"id": <编号>, "slot": "<value或return>", "type": "<类型>"}]
 \`\`\`
 
-支持的类型格式：
-- 基础: number, string, boolean, void, any, undefined, null
-- 数组: number[], string[], (string|number)[] 等
-- 联合: string | number, "a" | "b" | "c" 等
-- 函数: (x: number) => string, () => void 等
-- 对象: {x: number, y: string}
-- 泛型: Promise<number>, Array<string> 等
+你可以使用 TypeScript 完整类型系统，包括但不限于：基础类型、数组、元组、联合/交叉类型、函数签名、泛型、字面量类型、条件类型、映射类型等。
 
 规则：
-- 尽可能精确，不要简单写 any 或 object
+- 尽可能精确推断，避免使用 any/object/unknown 除非确实无法推断
 - slot=value 时输出该声明本身的类型；slot=return 时只输出函数返回类型，不要输出完整函数签名
 - 必须原样返回每个节点的 id 和 slot
-- 参数类型看调用处传入的实参类型
-- 变量类型看初始化表达式
-- 函数返回类型看 return 语句
-- 回调参数看 .map/.filter/.forEach 等方法的数组元素类型
-- 如果可以从上下文推断出更精确的类型，请使用复杂类型`;
+- 参数类型：看调用处传入的实参类型、参数名语义、默认值、使用方式（如 .map/.filter 中的回调参数类型与数组元素类型一致）
+- 变量类型：看初始化表达式、后续赋值、属性访问模式
+- 函数返回类型：综合所有 return 语句的返回值类型
+- 回调参数：看被调方法的类型签名（如 Array#map 的回调参数类型由数组元素类型决定）
+- 对象字面量：写出完整属性类型结构
+- 利用 TypeScript 高级特性（泛型约束、条件类型等）来表达更精确的类型`;
 }
 
 async function processFile(
