@@ -22,7 +22,8 @@ The suite currently covers:
 - ESM and CommonJS export-target selection;
 - raw JavaScript-to-TypeScript pipeline conversion and failure isolation;
 - TypeScript annotation erasure, graph-based restoration, and inference reuse isolation;
-- shared TypeScript compilation inputs, statuses, and declaration-emission rules.
+- shared TypeScript compilation inputs, statuses, and declaration-emission rules;
+- AST-located, declaration-only TypeScript auto-fix behavior.
 
 Tests use temporary project directories and do not require generated experiment
 outputs. Known limitations of name-based export selection are documented in
