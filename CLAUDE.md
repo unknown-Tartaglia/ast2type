@@ -1,151 +1,251 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文记录 `ast2type` 稳定的开发与评测约定。阶段性实验结果应保存在 TypeWeaver
+的运行 manifest 中，不要写入本文。
 
-## 常用命令
+## 仓库职责
 
-```bash
-# 对测试用例做类型推导（纯约束推断）
-./make.sh tests/basic_erase
+`ast2type` 负责：
 
-# 完整流程：擦除 TS 标注 + 生成 AST + 推断
-./make.sh tests/basic --prepare
+- JavaScript 与 TypeScript 类型推导；
+- Agent 候选生成与反馈注入；
+- JavaScript 到 TypeScript、擦除后 TypeScript 到 TypeScript 的迁移；
+- 推导类型织入与保守的 auto-fix；
+- 统一的 TypeScript 编译合同；
+- 聚焦回归测试与仓库完整回归测试。
 
-# 对 JS 文件直接做 AST 生成 + 推断（跳过擦除步骤）
-./make.sh tests/basic_erase --js --prepare --agent
+相邻的 TypeWeaver 是独立维护的 fork，负责数据集、实验编排、官方 Accuracy
+适配、运行 manifest 和跨方法结果汇总。不要把 TypeWeaver 数据或实验生成物移入本仓库。
 
-# 带 Agent LLM 增强的推断
-./make.sh tests/basic_erase --agent
+## 核心命令
 
-# 追踪某个 varId 的类型变化过程
-./make.sh tests/basic_erase --trace 108
-
-# JS→TS 迁移：pipeline 方案
-./tsify.sh pipeline --source-dir tests/typeweaver --output-dir output_ts
-
-# JS→TS 迁移：纯 LLM 方案（需设置 DEEPSEEK_API_KEY）
-./tsify.sh llm --source-dir tests/typeweaver --output-dir output_ts_llm
-
-# 验证生成的 .ts 文件能否通过编译
-npx tsc --noEmit --esModuleInterop --moduleResolution bundler --module es2015 --target es6 --lib es2021,dom --skipLibCheck output_ts/pkg/*.ts
-```
-
-### 迁移实验评估 (`TypeWeaver/`)
+在仓库根目录安装依赖并运行已跟踪的完整回归测试：
 
 ```bash
-# 小批量快速迭代（5 包，~50s）：pipeline + tsc + accuracy 一键完成
-cd /data/lm/aot/TypeWeaver && ./quick_eval.sh -d test-small
-
-# 强制重跑 pipeline（即使 .ts 已存在）
-./quick_eval.sh -d test-small --no-skip
-
-# 仅跑 tsc + accuracy（跳过 pipeline，前提是 .ts 已生成）
-./quick_eval.sh -d test-small --tsc-only
-
-# 跳过 auto_fix，直接 tsc，暴露原始推断质量
-./quick_eval.sh -d test-small --dry-tsc
-
-# 单包调试
-./quick_eval.sh -d test-small -p arrify
-
-# 全量评估（221 包）
-./quick_eval.sh -d top1k-typed-nodeps-es6
+npm ci
+npm test
 ```
 
-### 实验数据集目录约定
+修改具体子系统时，可先运行对应的聚焦测试：
 
-所有路径从一个实验名自动推导：
-
-```
-TypeWeaver/data/Pipeline-out/<实验名>/
-  conf              ← 包列表（一行一个包名，# 开头为注释）
-  source -> ...     ← symlink 指向 original/ 下的 JS 源码
-  baseline/         ← 生成的 .ts 文件（pipeline 输出）
-  baseline-checked/ ← tsc 编译结果（<pkg>.out = pass, <pkg>.err = fail）
-  baseline-typedefs/← 生成的 .d.ts（用于 accuracy 比对）
-  accuracy.csv      ← accuracy 汇总
-```
-
-**新增实验只需三步**：
 ```bash
-mkdir -p data/Pipeline-out/my-experiment/baseline
-ln -s ../../original/top1k-typed-nodeps-es6 data/Pipeline-out/my-experiment/source
-echo -e "pkg1\npkg2\npkg3" > data/Pipeline-out/my-experiment/conf
+python3 -m unittest tests.regression.test_agent_candidate_modes -v
+python3 -m unittest tests.regression.test_erased_ts_migration -v
+python3 -m unittest tests.regression.test_tsc_check -v
+python3 -m unittest tests.regression.test_auto_fix -v
 ```
 
-### 评估指标
+### 本地夹具推导
 
-`quick_eval.sh` 输出一张汇总表，同时展示两个维度的指标：
+对已跟踪的 TypeScript 夹具运行标准推导：
 
-| 指标 | 来源 | 含义 |
-|------|------|------|
-| **Compile** | tsc --declaration 是否通过 | 编译通过率（目标：尽可能高） |
-| **Accuracy** | 生成 .d.ts vs ground truth .d.ts 比对 | 类型正确率（correct/checked，排除 ground truth 为 any 的） |
-| **AnyRate** | inferred anys / (anys + checked) | any 率（目标：降低） |
+```bash
+./make.sh tests/ts/personal --prepare
+```
 
-注意：
-- compile 失败的包不参与 accuracy 统计（.d.ts 产出不完整）
-- accuracy 比对只匹配**单行** `function name(params): RetType` 格式，多行泛型/条件类型暂无法匹配（已知限制）
-- 语法错误（TS1xxx）不能被 `@ts-nocheck` 抑制，必须在 weave 阶段解决
+Agent 推导默认使用 `fair` 候选：
 
-## 架构概览
+```bash
+./make.sh tests/ts/personal --prepare --agent --agent-candidate-mode fair
+```
 
-### 核心推断引擎 (TypeScript, `ast2type/`)
+旧版/兼容候选集使用 `gt`：
 
-基于约束求解的类型推导系统，流程为：**源码 → AST → 事实收集(fact) → 规则应用(rule) → 约束图构建(graph) → 类型求解(solver) → 类型输出**。
+```bash
+./make.sh tests/ts/personal --prepare --agent --agent-candidate-mode gt
+```
 
-- **`fact.ts`** — 类型相关事实定义和存储（赋值、调用、运算、属性访问等），`VarId`/`TypeId` 为全局自增 ID
-- **`nType.ts`** — 类型系统。`nType` 为 discriminated union（primitive/literal/array/function/union/object/enum），`tNodeStore` 是全局 TypeId→nType 的注册表，提供类型的创建、合并、序列化
-- **`rule.ts`** — 将语言语义编码为类型推导规则，从 Facts 产生 GraphEffect（addEdge/genType/mergeNode等）
-- **`graph.ts`** — 类型约束图。节点为 VarId→NodeState，边表示子类型/同类型/ArgToParam/return 等约束关系。核心操作：类型传播、节点合并、冲突检测
-- **`solver.ts`** — 工作列表算法的求解器。先 ApplyRules 建图，然后迭代 propagate+extend 直到收敛（最多 1M 次迭代）。支持注入 LLM 推断结果增量求解
-- **`strategy.ts`** — 策略接口，`DeterminantStrategy` 实现确定性传播和合并
+上述针对 TypeScript 夹具的 `make.sh` 命令会自动把生成的 `_groundtruth.json`
+通过 `-g` 传回推导器。它们适合调试图、候选集和兼容行为，但不是 GT-independent
+的正式评测命令。正式的 fair TypeScript 评测应使用下文的
+`pipeline_erased_ts.py`。
 
-### JS→TS 迁移管线 (Python, `generate/`)
+使用 `--trace <varId>` 跟踪图传播，使用 `-f <feedback.json>` 重放外部反馈。
+Agent 反馈会注入图中并继续求解直至收敛，而不只是迁移时临时写入标注。
 
-- **`pipeline_ts.py`** — Pipeline 方案主入口。对每个包：运行 `make.sh --js --prepare --agent` → 从 `output/typegraph.json` 提取导出类型 → 织入 JS 生成 .ts → auto_fix 修复编译错误
-- **`weave.py`** — 类型织入引擎。将推断出的函数签名（如 `(a: T1, b: T2) => R`）和变量类型写入 JS 源码生成 .ts，支持正则匹配 function/arrow/const 声明
-- **`llm_ts.py`** — LLM 直接方案。对每个 .js 文件调用 DeepSeek API，直接输出带完整类型注解的 .ts 代码
-- **`auto_fix.py`** — 自动修复引擎。解析 tsc 错误（TS7006/2345/2322/2339等），按策略优先级（语法修复 → 隐式 any → 类型不匹配 → 兜底 `// @ts-ignore`）迭代修复直到通过或无变化。最终仍失败的加 `// @ts-nocheck`
+### JavaScript 到 Raw TypeScript
 
-### 入口脚本
+`pipeline_ts.py` 只生成 raw 织入结果，不执行 auto-fix：
 
-- **`make.sh`** — 单包类型推断入口。自动推导 `_erase_output` 等中间目录路径，组合擦除→AST→推断三阶段
-- **`tsify.sh`** — JS→TS 迁移分发入口，路由到 `pipeline_ts.py` 或 `llm_ts.py`
-- **`eraseAnnotation.ts`** — 使用 ts-morph 擦除 TypeScript 类型标注，同时生成 `_groundtruth.json` 用于后续评估
+```bash
+python3 generate/pipeline_ts.py \
+  --source-dir <javascript-packages> \
+  --output-dir <raw-typescript> \
+  --packages package-a,package-b
+```
 
-### 辅助模块
+等价的分发入口是 `./tsify.sh pipeline ...`。该 pipeline 依次执行 JavaScript-only
+AST 准备、Agent 推导、typegraph 提取、类型织入、Node 全局声明注入，并隔离单包失败。
 
-- **`code2ast.ts`** — AST 生成器，输出 `.ast.json` 和文件索引
-- **`statistics.py`** / **`evaluation_stats.py`** — 类型分布和准确率统计，生成 matplotlib 图表
-- **`agent/infer.ts`** — LLM Agent 推理引擎。收集 unkinfo（图中无类型的声明盲点）、按文件分组、并发调用 DeepSeek 推断类型、写回 `inferinfo.json` 供 solver 注入
+### 擦除后 TypeScript 迁移
 
-### 测试目录结构 (`tests/`)
+评测已有 TypeScript 项目时使用擦除迁移 pipeline。它会擦除标注、从擦除后的源码推导，
+再把推导标注恢复到擦除后的 TypeScript 中：
 
-每个测试项目遵循约定：`<name>` 为 TS 源码，`<name>_erase` 为擦除后的 JS，`<name>_erase_output` 为推断结果（AST+typegraph）。`make.sh` 自动推导这些路径。
+```bash
+python3 generate/pipeline_erased_ts.py \
+  --projects-root tests/ts \
+  --output-root /tmp/ast2type-erased-run \
+  --packages personal,mapcn \
+  --agent
+```
 
-## 当前工作重点
+省略 `--agent` 即使用标准推导。只有通过 `--reuse-inference-root` 才允许复用推导；
+复用前必须验证擦除源码逐字节一致，并验证 standard/Agent 模式 manifest 一致。
 
-**当前 Goal：在小数据集上，通过设计 Any 率 ↔ 编译通过率的权衡策略，评测「用当前推导出的类型做 JS→TS 迁移」的效果。前提是不让 weave 织入与 auto_fix 修复引入结构性错误，以保证评测干净可信。**
+### 统一 TypeScript 编译
 
-- **评测对象**：推导引擎产出的类型，用于 JS→TS 迁移时的实际表现。
-- **方法 / 杠杆**：设计权衡策略——把推导不准 / 错误的类型降级为 `any`，换取 tsc 编译通过，量化「Any 率 ↔ 编译通过率」这条 trade-off 曲线能走多高。
-- **前提约束（硬门槛）**：类型只能注入声明位置；weave 织入和 auto_fix 修复**都不得**在使用位置（`${}` 模板插值、函数调用实参、表达式引用）插入类型而制造语法错误（TS1xxx）。否则结构 bug 会污染指标，测不出推导类型的真实迁移效果。
-- **载体**：小数据集（如 `test-small`）运行 + 评估，快速迭代。
-- **指标**：Compile（编译通过率，主）、AnyRate（代价）、Accuracy（推导质量参考）。
+所有正式编译检查和 auto-fix 迭代都必须使用 `generate/tsc_check.py`：
 
-**迭代进展（test-small）**：
-- 修复 `auto_fix._fix_implicit_any`：改用 tsc 列号(e.col)精确定位参数声明位置插入 `: any`，不再全行正则替换 → 消除「${x} 被误注解成 ${x: any}」等使用位置结构错误，使用位置误注解 3→0。
-- **移除 @ts-nocheck 兜底(作弊)**：auto_fix 步骤3不再整文件加 @ts-nocheck。诚实编译率(真实类型检查)：test-small **Pipeline 4/10**——ML/LLM 方法中最高(它们 1-2/10)，但略低于 tsc 基线(5/10)。此前9/10是 nocheck 灌水的假象。合法手段只有把类型降级为 any。
-- 剩余 FAIL：`co` —— tsc 在 `--declaration` 生成 .d.ts 时内部崩溃(Debug Failure @ handleSymbolAccessibilityError)，`--noEmit` 下正常。属 tsc 自身 bug × 评测强制 --declaration 的交互，非我们注入的结构错误，@ts-nocheck 无法抑制。
-- **硬门槛闭环验证**：`--dry-tsc --no-skip` 跑纯 weave 产物(无 auto_fix)，使用位置误注解 0 处、Compile 9/10 —— 证明 weave 自身也不产生结构性错误。且当前 tsc 配置未开 --strict/--noImplicitAny，TS7006 不报错，纯 weave 本就编译干净；此前 3 包 FAIL 全由旧 auto_fix 的结构 bug 造成(把能过的包搞挂)。co 在纯 weave 阶段即 crash，与 weave/auto_fix 无关。
+```bash
+python3 generate/tsc_check.py config --field version
+python3 generate/tsc_check.py check \
+  --declaration-dir /tmp/ast2type-declarations \
+  --diagnostics-file /tmp/ast2type-diagnostics.txt \
+  --status-file /tmp/ast2type-status.txt \
+  path/to/source.ts
+```
 
-- **小批量迭代**：`cd /data/lm/aot/TypeWeaver && ./quick_eval.sh -d test-small`（5 包，~50s）
-- **全量评估**：`./quick_eval.sh -d top1k-typed-nodeps-es6`（221 包）
-- **实验数据路径**：`/data/lm/aot/TypeWeaver/data/Pipeline-out/<实验名>/`（详见上方"实验数据集目录约定"）
-- **本地 tsc 版本**：`npx tsc` 解析到 `node_modules/.bin/tsc`（5.9.3）
+不能用 `tsc --noEmit` 代替正式检查。统一合同会执行 declaration emit 和
+`--noEmitOnError`，并把结果分类为 `PASS`、`TYPE_ERROR` 或 `TOOL_ERROR`。
 
-关键调参位置：
-- `generate/auto_fix.py` 的修复策略 —— 影响 .ts 最终是否通过 `tsc --noEmit`。注意 `@ts-nocheck` 只抑制类型错误（TS2xxx），不抑制语法错误（TS1xxx），因此语法错误必须被修复
-- `generate/pipeline_ts.py` 的 `_full_type_to_ts()` —— 控制哪些类型被输出为 `any`
-- `generate/weave.py` 的 `_sanitize_ts_type()` —— 清洗畸形类型为 `any`
+### 保守 Auto-Fix
+
+Auto-fix 与 raw 生成必须分开执行。除非显式传入 `--in-place`，批处理入口默认采用
+copy-on-write：
+
+```bash
+python3 generate/run_auto_fix_all.py \
+  --baseline-dir <raw-package-root> \
+  --output-dir <fixed-package-root> \
+  --results <run-manifest.json>
+```
+
+输出目录和结果文件不能已经存在，也不能与 baseline 或包输出目录重叠。
+
+## 架构
+
+类型推导主流程为：
+
+```text
+源码 -> AST -> 事实 -> 规则 -> 约束图 -> 求解器 -> 类型输出
+```
+
+核心模块：
+
+- `ast2type/fact.ts`：语言事实与事实存储；
+- `ast2type/rule.ts`：语义规则与图效果；
+- `ast2type/graph.ts`：约束图与类型传播；
+- `ast2type/solver.ts`：工作列表求解与反馈再注入；
+- `ast2type/nType.ts`：内部类型表示与序列化；
+- `ast2type/strategy.ts`：确定性/概率化策略边界；
+- `agent/infer.ts`：LLM Agent 候选推导；
+- `generate/weave.py`：推导结果声明织入；
+- `generate/weave_erased_ts.py`：基于 span 的擦除后 TypeScript 恢复；
+- `generate/auto_fix.py` 与 `generate/locate_auto_fix.js`：基于 AST 定位的类型降级；
+- `generate/tsc_check.py`：编译与 declaration emit 合同。
+
+## 不可破坏的合同
+
+### Fair 与 Ground-Truth 候选模式
+
+- `fair` 是默认模式，也是 GT-independent 正式结果唯一允许使用的候选模式。
+- `fair` 只保证 Agent 候选发现与 ground truth 无关；只有整次运行没有额外使用
+  `-g` 注入图约束时，完整结果才是 GT-independent。
+- `gt` 保留历史 graph 候选行为，可能暴露带 ground-truth 标注的图位置，必须明确标为
+  `gt`。
+- 不能比较未标注或混合了 `fair`、`gt` 的结果。
+- 不支持或无法解析的 ground-truth 类型属于 `unknown`，不得作为约束注入。
+
+擦除后 TypeScript 迁移可以使用 ground-truth span 元数据定位原标注槽位，但 fair
+推导不得使用 ground-truth 类型值。
+
+### 类型织入
+
+- 类型只能写入声明或签名位置。
+- 不得改写函数调用、实参、模板插值、属性使用或其他运行时表达式。
+- 必须保留默认参数表达式、注释、shebang、指令，以及 UTF-8 内容和换行风格。
+- 必须保留原始源码和 raw 织入结果，以便比较。
+
+修改基于名称的导出目标选择前，先阅读 `docs/weave-known-limitations.md`。
+
+### Auto-Fix
+
+- 必须通过 TypeScript AST/type checker，把 diagnostic 解析到可编辑声明。
+- 只允许把已有声明 `TypeNode` 替换为 `any`，或在需要时插入安全的参数、变量、
+  属性类型标注。
+- 禁止使用 `@ts-ignore`、`@ts-nocheck`、表达式 cast 或使用位置改写。
+- 无法找到唯一安全声明目标时必须跳过。
+- for-in/for-of 中不安全的声明标注必须跳过。
+- 必须正确处理 UTF-16 diagnostic 偏移并保留 CRLF。
+
+当前安全支持的 diagnostic 为 TS7006、TS2322、TS2339、TS2358、TS2538 和
+TS2571。扩展错误码前必须增加行为测试，证明运行时文本没有改变。
+
+### 编译合同
+
+- 确定性地发现 `.ts`、`.tsx`、`.mts` 和 `.cts` 根文件。
+- 排除 `.d.ts`、`.d.mts`、`.d.cts`、`.ets`、`node_modules` 和 `.git`。
+- Auto-fix 与最终评测必须调用同一份共享合同。
+- `TOOL_ERROR` 不能计作方法自身的类型错误。
+- 调用方必须单独报告空包，不能把空输入当作有意义的编译通过。
+- 编译失败后不能留下旧的或部分生成的 declaration 输出。
+
+### Raw 与 Fixed 结果
+
+- `pipeline_ts.py` 的输出是 `raw`。
+- `fixed` 必须从 `raw` 的副本通过独立 auto-fix 入口生成。
+- 正式比较中禁止修改规范 raw baseline。
+- Run manifest 必须记录编译器版本、参数、输入/输出指纹、状态、diagnostic/edit 数量、
+  修改路径和耗时。
+- 当前结果不能以未版本化的历史 CSV 为来源。
+
+所有 TypeWeaver runner 都必须遵守该拆分。`pipeline_ts.py` 不存在
+`--no-auto-fix` 选项，因为它本身从不执行 auto-fix。
+
+## 评测结果报告
+
+每次比较必须注明：
+
+- 数据集或项目集合；
+- 推导模式：`std` 或 `agent`；
+- Agent 候选模式：`fair` 或 `gt`；
+- 结果变体：`raw`、`fixed` 或 `groundtruth`；
+- 编译合同与编译器版本；
+- 包或文件的分母。
+
+类型推导表必须拆分 `Wrong` 和 `Undetermined`。需要同时展示两种正确率时，必须明确写出
+公式：
+
+- 已判定正确率：`Correct / (Correct + Wrong)`；
+- 包含未定项的正确率：`Correct / (Correct + Wrong + Undetermined)`。
+
+同时分别报告 `Missing`、`Any`、`Unknown` 和 `Ignored`。解释 ground truth 或推导结果
+无法编译的原因时，不能隐藏缺失模块 diagnostic。
+
+编译结果表必须同时给出包级通过率和 diagnostic 总数，并拆分 `TYPE_ERROR`、
+`TOOL_ERROR`、缺失输入和空输入。与 TypeWeaver 比较 Accuracy 时必须复用其官方兼容
+语义，即使该比较器有意保持粗粒度。
+
+## 跨仓库实验
+
+TypeWeaver fork 应通过 `AST2TYPE_ROOT` 定位本仓库，只把相邻目录作为便利的默认值。
+TypeWeaver 负责 `quick_eval.sh`、官方 Accuracy 适配器和实验 manifest。
+
+正式 manifest 必须记录两个仓库各自的 commit、branch、dirty 状态和实现指纹。
+跨仓库改动应分别提交，并在实验记录中引用配对的 commit hash。
+
+## 测试与 Git 约定
+
+- 开发时运行聚焦测试，每次提交前运行 `npm test`。
+- 可能依赖未跟踪实验文件的改动，必须把暂存内容导出到干净临时目录中测试。
+- 对非显然的解析、偏移、图算法或文件系统安全逻辑添加简洁注释。
+- 不要提交新生成的 `output/`、`*_erase`、`*_output`、declaration、baseline、
+  checked result、run log 或实验结果目录；只有被已跟踪测试明确使用并经过评审的固定
+  回归夹具可以例外。
+- 在来源、版本、许可证和最小测试用途得到说明前，不要提交 `tests/typeweaver/` 中的
+  外部包夹具。
+- 在 dirty worktree 中必须精确暂存路径，并保留无关的用户改动或数据改动。
+
+已跟踪的回归测试必须自包含，不能依赖生成的实验输出或未跟踪的相邻 TypeWeaver
+checkout。
