@@ -40,12 +40,48 @@ class TypeRenderingTests(unittest.TestCase):
             "(values: number[]) => boolean",
         )
 
+    def test_complex_array_elements_are_parenthesized(self):
+        union_array = {
+            "kind": "array",
+            "elementType": {
+                "kind": "union",
+                "types": [
+                    {"kind": "primitive", "name": "string"},
+                    {"kind": "primitive", "name": "number"},
+                ],
+            },
+        }
+        function_array = {
+            "kind": "array",
+            "elementType": {
+                "kind": "function",
+                "params": [{
+                    "name": "value",
+                    "type": {"kind": "primitive", "name": "string"},
+                }],
+                "returnType": {"kind": "primitive", "name": "number"},
+            },
+        }
+
+        self.assertEqual(
+            pipeline_ts._full_type_to_ts(union_array),
+            "(string | number)[]",
+        )
+        self.assertEqual(
+            pipeline_ts._full_type_to_ts(function_array),
+            "((value: string) => number)[]",
+        )
+
     def test_invalid_named_types_degrade_to_any(self):
         self.assertEqual(
             pipeline_ts._full_type_to_ts("new (value: string): Item"),
             "any",
         )
         self.assertEqual(pipeline_ts._full_type_to_ts("object:"), "any")
+        self.assertEqual(
+            pipeline_ts._full_type_to_ts("PromiseConstructor"),
+            "Promise<any>",
+        )
 
     def test_structural_object_type_is_rendered(self):
         full_type = {
@@ -60,6 +96,24 @@ class TypeRenderingTests(unittest.TestCase):
         self.assertEqual(
             pipeline_ts._full_type_to_ts(full_type),
             '{ open: string; "close-value": boolean }',
+        )
+
+    def test_bigint_literal_json_is_rendered_as_typescript(self):
+        self.assertEqual(
+            pipeline_ts._full_type_to_ts({
+                "kind": "literal",
+                "value": "0x2adbeefn",
+                "valueKind": "bigint",
+            }),
+            "0x2adbeefn",
+        )
+        self.assertEqual(
+            pipeline_ts._full_type_to_ts({
+                "kind": "literal",
+                "value": "not-a-literal",
+                "valueKind": "bigint",
+            }),
+            "bigint",
         )
 
 
@@ -97,7 +151,7 @@ class PackageDiscoveryTests(unittest.TestCase):
 
 
 class PipelineExecutionTests(unittest.TestCase):
-    def test_run_pipeline_removes_stale_artifacts_and_honors_timeout(self):
+    def test_run_pipeline_isolates_artifacts_and_honors_timeout(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             package = root / "package"
@@ -120,13 +174,36 @@ class PipelineExecutionTests(unittest.TestCase):
             ):
                 pipeline_ts.run_pipeline(str(package), timeout=37)
 
-            self.assertFalse(package_output.exists())
+            # A formal run must not delete historical artifacts beside source.
+            self.assertTrue(package_output.exists())
             self.assertFalse(stale_typegraph.exists())
             self.assertEqual(run_command.call_args.kwargs["timeout"], 37)
-            self.assertEqual(
-                run_command.call_args.args[0][-3:],
-                ["--js", "--prepare", "--agent"],
-            )
+            command = run_command.call_args.args[0]
+            self.assertIn("--output-dir", command)
+            self.assertIn("--agent", command)
+            self.assertEqual(command[-2:], ["--agent-candidate-mode", "fair"])
+
+    def test_run_pipeline_standard_mode_does_not_enable_agent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = root / "package"
+            package.mkdir()
+            inference = root / "inference"
+
+            with mock.patch.object(
+                pipeline_ts.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=0),
+            ) as run_command:
+                pipeline_ts.run_pipeline(
+                    str(package),
+                    inference_mode="std",
+                    inference_output_dir=str(inference),
+                )
+
+            command = run_command.call_args.args[0]
+            self.assertNotIn("--agent", command)
+            self.assertEqual(command[-2:], ["--output-dir", str(inference)])
 
     def test_package_without_named_functions_is_still_migrated(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -162,7 +239,16 @@ class PipelineExecutionTests(unittest.TestCase):
                 migrated.read_text(encoding="utf-8"),
                 "const config = { enabled: true };\nexport default config;\n",
             )
-            run_pipeline.assert_called_once_with(str(source), timeout=23)
+            run_pipeline.assert_called_once_with(
+                str(source),
+                timeout=23,
+                inference_mode="agent",
+                inference_output_dir=str(output / ".inference" / "sample"),
+                agent_candidate_mode="fair",
+                agent_provider=None,
+                agent_model=None,
+                agent_base_url=None,
+            )
 
     def test_nonzero_inference_command_is_a_pipeline_failure(self):
         with tempfile.TemporaryDirectory() as temporary:

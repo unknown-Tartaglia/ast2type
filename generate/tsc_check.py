@@ -84,8 +84,8 @@ def compiler_path() -> Path:
     return DEFAULT_TSC.resolve()
 
 
-def compiler_version() -> str:
-    compiler = compiler_path()
+def compiler_version(compiler: str | os.PathLike[str] | None = None) -> str:
+    compiler = Path(compiler).resolve() if compiler is not None else compiler_path()
     try:
         completed = subprocess.run(
             [str(compiler), "--version"],
@@ -100,6 +100,77 @@ def compiler_version() -> str:
         return "unavailable"
     output = (completed.stdout + completed.stderr).strip()
     return output.splitlines()[0] if output else "unavailable"
+
+
+def check_typescript_project(
+    project_dir: str | os.PathLike[str],
+    *,
+    compiler: str | os.PathLike[str] | None = None,
+    config: str | os.PathLike[str] = "tsconfig.json",
+    extra_args: Sequence[str] = (),
+    timeout: int = 120,
+) -> TscResult:
+    """Type-check a project with its own compiler and tsconfig.
+
+    This contract is intentionally separate from ``check_typescript``. The
+    latter emits declarations under one dataset-wide configuration, while this
+    function answers whether a project passes in its declared build environment.
+    """
+    working_directory = Path(project_dir).resolve()
+    selected_compiler = (
+        Path(compiler).resolve() if compiler is not None else compiler_path()
+    )
+    selected_config = Path(config)
+    if not selected_config.is_absolute():
+        selected_config = working_directory / selected_config
+    command = (
+        str(selected_compiler),
+        "--project",
+        str(selected_config.resolve()),
+        "--noEmit",
+        "--pretty",
+        "false",
+        *extra_args,
+    )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=working_directory,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        output = completed.stdout + completed.stderr
+        return TscResult(
+            _classify(completed.returncode, output),
+            completed.returncode,
+            output,
+            command,
+        )
+    except subprocess.TimeoutExpired as error:
+        stdout = (
+            error.stdout.decode()
+            if isinstance(error.stdout, bytes)
+            else (error.stdout or "")
+        )
+        stderr = (
+            error.stderr.decode()
+            if isinstance(error.stderr, bytes)
+            else (error.stderr or "")
+        )
+        return TscResult(
+            TscStatus.TOOL_ERROR,
+            -1,
+            f"{stdout}{stderr}\nTSC_TIMEOUT after {timeout}s\n",
+            command,
+        )
+    except OSError as error:
+        return TscResult(
+            TscStatus.TOOL_ERROR,
+            -1,
+            f"TSC_NOT_FOUND: {selected_compiler}: {error}\n",
+            command,
+        )
 
 
 def _classify(returncode: int, output: str) -> TscStatus:

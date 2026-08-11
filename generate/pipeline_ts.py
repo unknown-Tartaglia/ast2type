@@ -2,8 +2,8 @@
 """
 Pipeline: 直接通过 typegraph.json 将 JS 转为 .ts。
 
-对每个包运行 ast2type 管线 (make.sh --agent)，从 typegraph.json 提取
-函数签名和变量类型，直接织入 JS 源码生成 .ts 文件，保持原目录结构。
+对每个包运行 ast2type 管线（std 或 agent），从 typegraph.json 提取
+函数签名，按 typegraph 的文件和源码位置织入 JS，生成 .ts 文件并保持原目录结构。
 
 不经过 .d.ts 中转 —— 直接使用管道内部的类型推断结果。
 
@@ -18,6 +18,7 @@ Pipeline: 直接通过 typegraph.json 将 JS 转为 .ts。
       --packages ansi-regex,abab
 """
 import argparse, json, os, re, shutil, subprocess, sys, time
+from collections import Counter
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, ".."))
@@ -27,7 +28,16 @@ OUT_DIR = os.path.join(ROOT_DIR, "output")
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from generate.weave import _sanitize_ts_type, weave_package
+from generate.weave import (
+    _inject_class_fields,
+    _normalize_default_export_assignments,
+    _sanitize_ts_type,
+    _split_function_arrow,
+)
+from generate.weave_typegraph_ast import (
+    TypegraphWeaveError,
+    weave_typegraph_package,
+)
 
 
 # ==================== 类型转换: pipeline typegraph → TypeScript ====================
@@ -35,6 +45,31 @@ from generate.weave import _sanitize_ts_type, weave_package
 def _is_template_literal(s):
     """检查字符串是否是模板字面量 (以反引号包围)."""
     return isinstance(s, str) and s.startswith("`") and s.endswith("`")
+
+
+def _has_top_level_union_or_intersection(ts_type):
+    """Return whether an array element type needs grouping before ``[]``."""
+    depth = 0
+    quote = None
+    escaped = False
+    for character in ts_type:
+        if quote:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in "'\"`":
+            quote = character
+        elif character in "([{<":
+            depth += 1
+        elif character in ")]}>" and depth:
+            depth -= 1
+        elif depth == 0 and character in "|&":
+            return True
+    return False
 
 
 def _full_type_to_ts(ft):
@@ -52,6 +87,8 @@ def _full_type_to_ts(ft):
             return "undefined"
         if ft == "unknown":
             return "any"
+        if ft == "PromiseConstructor":
+            return "Promise<any>"
         if not ft or re.match(r'^obj_\d+$', ft):
             return "any"
         # constructor 类型: "new (params) : RetType" → any
@@ -77,6 +114,11 @@ def _full_type_to_ts(ft):
 
     if kind == "literal":
         val = ft.get("value")
+        if ft.get("valueKind") == "bigint" and isinstance(val, str):
+            bigint_literal = (
+                r'^(?:\d+|0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+)n$'
+            )
+            return val if re.match(bigint_literal, val) else "bigint"
         if val is None:
             return "null"
         if isinstance(val, bool):
@@ -131,6 +173,9 @@ def _full_type_to_ts(ft):
     # 数组等
     if kind == "array":
         elem = _full_type_to_ts(ft.get("elementType", {"kind": "primitive", "name": "any"}))
+        if (_split_function_arrow(elem) is not None
+                or _has_top_level_union_or_intersection(elem)):
+            elem = f"({elem})"
         return f"{elem}[]"
 
     return "any"
@@ -217,17 +262,42 @@ def discover_packages(source_dir):
 
 # ==================== 主流程 ====================
 
-def run_pipeline(pkg_dir, timeout=600):
+def run_pipeline(
+    pkg_dir,
+    timeout=600,
+    inference_mode="agent",
+    inference_output_dir=None,
+    agent_candidate_mode="fair",
+    agent_provider=None,
+    agent_model=None,
+    agent_base_url=None,
+):
     """Run inference from fresh package artifacts or raise on failure."""
-    typegraph_path = os.path.join(OUT_DIR, "typegraph.json")
-    if os.path.isfile(typegraph_path):
-        os.remove(typegraph_path)
+    if inference_mode not in {"std", "agent"}:
+        raise ValueError(f"unsupported inference mode: {inference_mode}")
 
-    package_output = f"{pkg_dir}_output"
-    if os.path.isdir(package_output):
-        shutil.rmtree(package_output)
+    inference_output_dir = os.path.abspath(inference_output_dir or OUT_DIR)
+    # Each package starts from an empty inference directory. This prevents a
+    # failed package from accidentally reusing the previous package's graph.
+    if os.path.isdir(inference_output_dir):
+        shutil.rmtree(inference_output_dir)
 
-    cmd = [MAKE_SH, pkg_dir, "--js", "--prepare", "--agent"]
+    cmd = [
+        MAKE_SH,
+        pkg_dir,
+        "--js",
+        "--prepare",
+        "--output-dir",
+        inference_output_dir,
+    ]
+    if inference_mode == "agent":
+        cmd.extend(["--agent", "--agent-candidate-mode", agent_candidate_mode])
+        if agent_provider:
+            cmd.extend(["--agent-provider", agent_provider])
+        if agent_model:
+            cmd.extend(["--agent-model", agent_model])
+        if agent_base_url:
+            cmd.extend(["--agent-base-url", agent_base_url])
     print(f"  cmd: {' '.join(cmd)}")
     proc = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=False, timeout=timeout)
     if proc.returncode != 0:
@@ -311,6 +381,46 @@ def _inject_node_globals(ts_files):
     return fixed
 
 
+def _write_weave_report(pkg_out_dir, report):
+    os.makedirs(pkg_out_dir, exist_ok=True)
+    report_path = os.path.join(pkg_out_dir, "ast2type-weave-report.json")
+    with open(report_path, "w", encoding="utf-8") as report_file:
+        json.dump(report, report_file, indent=2, ensure_ascii=False)
+        report_file.write("\n")
+
+
+def _weave_summary(pkg_out_dir):
+    report_path = os.path.join(pkg_out_dir, "ast2type-weave-report.json")
+    if not os.path.isfile(report_path):
+        return None
+    try:
+        with open(report_path, encoding="utf-8") as report_file:
+            report = json.load(report_file)
+    except (OSError, json.JSONDecodeError):
+        return None
+    reasons = Counter(
+        item.get("reason", "unknown")
+        for item in report.get("skipped", [])
+        if isinstance(item, dict)
+    )
+    return {
+        key: report.get(key, 0)
+        for key in (
+            "function_nodes",
+            "canonical_targets",
+            "ignored_noncanonical",
+            "ignored_duplicate_canonical",
+            "located_targets",
+            "woven_targets",
+            "edits",
+            "skipped_targets",
+            "modified_files",
+            "compatibility_normalized_files",
+            "node_global_declaration_files",
+        )
+    } | {"skipped_reasons": dict(sorted(reasons.items()))}
+
+
 def generate_ts_for_pkg(
     pkg_dir,
     pkg_name,
@@ -318,6 +428,11 @@ def generate_ts_for_pkg(
     cleanup=True,
     skip_existing=True,
     timeout=600,
+    inference_mode="agent",
+    agent_candidate_mode="fair",
+    agent_provider=None,
+    agent_model=None,
+    agent_base_url=None,
 ):
     """对单个包运行管线 → 提取类型 → 织入 → 写 .ts。
 
@@ -347,8 +462,20 @@ def generate_ts_for_pkg(
         shutil.rmtree(pkg_out_dir)
 
     # 1. 运行管线
+    inference_output_dir = os.path.join(
+        os.path.abspath(output_dir), ".inference", pkg_name
+    )
     try:
-        run_pipeline(pkg_dir, timeout=timeout)
+        run_pipeline(
+            pkg_dir,
+            timeout=timeout,
+            inference_mode=inference_mode,
+            inference_output_dir=inference_output_dir,
+            agent_candidate_mode=agent_candidate_mode,
+            agent_provider=agent_provider,
+            agent_model=agent_model,
+            agent_base_url=agent_base_url,
+        )
     except subprocess.TimeoutExpired:
         message = f"pipeline timed out after {timeout}s"
         print(f"  ⚠ {message}")
@@ -359,34 +486,55 @@ def generate_ts_for_pkg(
         return ("failed", 0, [message])
 
     # 2. 从 typegraph 提取类型
-    typegraph = _load_typegraph(OUT_DIR)
+    typegraph = _load_typegraph(inference_output_dir)
     if not typegraph:
         print(f"  ⚠ 未生成 typegraph.json, 跳过")
         return ("failed", 0, ["no typegraph"])
 
-    exports = _extract_exports_from_typegraph(typegraph)
-    if not exports:
-        print("  typegraph 中无具名函数, 原样迁移 JS/MJS")
-    else:
-        print(f"  从 typegraph 提取 {len(exports)} 个类型:")
-        for e in exports[:10]:
-            print(f"    {e['name']}: {e['inferred']}")
-        if len(exports) > 10:
-            print(f"    ... 还有 {len(exports) - 10} 个")
-
-    # 3. 织入 JS → .ts
-    woven = weave_package(pkg_dir, exports)
+    # 3. 仅使用 canonical 函数节点，并按 file + position 精确写回。
+    try:
+        woven, weave_report = weave_typegraph_package(
+            pkg_dir,
+            typegraph,
+            render_type=_full_type_to_ts,
+        )
+    except (OSError, TypegraphWeaveError) as error:
+        message = f"AST weave failed: {error}"
+        print(f"  ⚠ {message}")
+        return ("failed", 0, [message])
     if not woven:
         return ("skipped", 0, ["no JavaScript files"])
+    print(
+        "  AST 编织: "
+        f"目标 {weave_report['canonical_targets']}, "
+        f"命中 {weave_report['located_targets']}, "
+        f"跳过 {weave_report['skipped_targets']}, "
+        f"编辑 {weave_report['edits']}"
+    )
+    if (weave_report["canonical_targets"] > 0
+            and weave_report["located_targets"] == 0):
+        message = "AST weave located 0 canonical targets"
+        weave_report["validation_error"] = message
+        _write_weave_report(pkg_out_dir, weave_report)
+        print(f"  ⚠ {message}")
+        return ("failed", 0, [message])
 
     # 4. 写入输出目录 (保持原目录结构, 改后缀 .js → .ts)
     count = 0
+    normalized_files = 0
     for rel, content in woven.items():
         ts_rel = os.path.splitext(rel)[0] + ".ts"
         ts_path = os.path.join(pkg_out_dir, ts_rel)
         os.makedirs(os.path.dirname(ts_path), exist_ok=True)
+        # These compatibility transforms address JS class/export constructs;
+        # function annotation placement itself is exclusively AST-positioned.
+        normalized = _inject_class_fields(
+            _normalize_default_export_assignments(content)
+        )
+        if normalized != content:
+            normalized_files += 1
         with open(ts_path, "w", encoding="utf-8") as f:
-            f.write(content)
+            f.write(normalized)
         count += 1
 
     print(f"  生成 {count} 个 .ts 文件 → {pkg_out_dir}/")
@@ -402,12 +550,18 @@ def generate_ts_for_pkg(
     if ng_fixed:
         print(f"  注入 Node.js 全局声明: {ng_fixed} 文件")
 
+    weave_report["compatibility_normalized_files"] = normalized_files
+    weave_report["node_global_declaration_files"] = ng_fixed
+    _write_weave_report(pkg_out_dir, weave_report)
+
     # 5. 清理
     if cleanup:
-        shutil.rmtree(OUT_DIR, ignore_errors=True)
-        out_suffix = f"{pkg_dir}_output"
-        if os.path.isdir(out_suffix):
-            shutil.rmtree(out_suffix, ignore_errors=True)
+        shutil.rmtree(inference_output_dir, ignore_errors=True)
+        inference_parent = os.path.dirname(inference_output_dir)
+        try:
+            os.rmdir(inference_parent)
+        except OSError:
+            pass
 
     return ("ok", count, [])
 
@@ -424,11 +578,32 @@ def main():
                         help="逗号分隔的包名列表 (默认: 自动发现)")
     parser.add_argument("--timeout", type=int, default=600,
                         help="每个包的管线超时秒数 (默认 600)")
+    parser.add_argument("--inference-mode", choices=("std", "agent"),
+                        default="agent",
+                        help="推断模式（默认 agent，正式实验应显式指定）")
+    parser.add_argument("--agent-candidate-mode", choices=("fair", "gt"),
+                        default="fair",
+                        help="Agent 候选模式（TypeWeaver 评测使用 fair）")
+    parser.add_argument("--agent-provider", choices=("deepseek", "openai"),
+                        help="Agent API provider（默认由环境变量决定）")
+    parser.add_argument("--agent-model",
+                        help="覆盖 provider 默认模型")
+    parser.add_argument("--agent-base-url",
+                        help="覆盖 provider API base URL")
     parser.add_argument("--no-cleanup", action="store_true",
                         help="保留 make.sh 中间产物")
     parser.add_argument("--no-skip", action="store_true",
                         help="即使 .ts 已存在也重新生成")
+    parser.add_argument("--results-file",
+                        help="逐包生成结果 JSON（默认输出目录/pipeline-results.json）")
     args = parser.parse_args()
+
+    if args.inference_mode == "std" and any((
+        args.agent_provider,
+        args.agent_model,
+        args.agent_base_url,
+    )):
+        parser.error("std 模式不能使用 agent provider/model/base URL 参数")
 
     source_dir = os.path.abspath(args.source_dir)
     output_dir = os.path.abspath(args.output_dir)
@@ -448,6 +623,7 @@ def main():
     print(f"  源目录:   {source_dir}")
     print(f"  输出目录: {output_dir}")
     print(f"  包数量:   {len(packages)}")
+    print(f"  推断模式: {args.inference_mode}")
     print(f"  包列表:   {', '.join(packages)}")
     print("=" * 60)
 
@@ -458,7 +634,9 @@ def main():
         pkg_dir = os.path.join(source_dir, pkg_name)
         if not os.path.isdir(pkg_dir):
             print(f"  [{idx+1}/{len(packages)}] {pkg_name} — 目录不存在, 跳过")
-            results.append((pkg_name, "skipped", 0))
+            results.append((
+                pkg_name, "failed", 0, ["source directory missing"], None
+            ))
             continue
 
         status, count, errors = generate_ts_for_pkg(
@@ -466,8 +644,19 @@ def main():
             cleanup=not args.no_cleanup,
             skip_existing=not args.no_skip,
             timeout=args.timeout,
+            inference_mode=args.inference_mode,
+            agent_candidate_mode=args.agent_candidate_mode,
+            agent_provider=args.agent_provider,
+            agent_model=args.agent_model,
+            agent_base_url=args.agent_base_url,
         )
-        results.append((pkg_name, status, count))
+        results.append((
+            pkg_name,
+            status,
+            count,
+            errors,
+            _weave_summary(os.path.join(output_dir, pkg_name)),
+        ))
 
     elapsed = time.time() - total_start
 
@@ -477,7 +666,7 @@ def main():
     print(f"  {'Package':<24} {'Status':<10} {'Files':>6}")
     print(f"  {'-'*42}")
     ok = fail = skipped = 0
-    for pkg, status, count in results:
+    for pkg, status, count, _errors, _weave in results:
         print(f"  {pkg:<24} {status:<10} {count:>6}")
         if status == "ok":
             ok += 1
@@ -488,6 +677,34 @@ def main():
     print(f"\n  {ok} ok, {skipped} skipped, {fail} failed")
     print(f"  输出: {output_dir}")
 
+    results_path = os.path.abspath(
+        args.results_file or os.path.join(output_dir, "pipeline-results.json")
+    )
+    os.makedirs(os.path.dirname(results_path), exist_ok=True)
+    with open(results_path, "w", encoding="utf-8") as result_file:
+        json.dump({
+            "schema": 1,
+            "inference_mode": args.inference_mode,
+            "agent_candidate_mode": (
+                args.agent_candidate_mode if args.inference_mode == "agent" else None
+            ),
+            "elapsed_seconds": round(elapsed, 6),
+            "counts": {"ok": ok, "skipped": skipped, "failed": fail},
+            "results": [
+                {
+                    "package": pkg,
+                    "status": status,
+                    "files": count,
+                    "errors": errors,
+                    "weave": weave,
+                }
+                for pkg, status, count, errors, weave in results
+            ],
+        }, result_file, indent=2)
+        result_file.write("\n")
+    print(f"  生成记录: {results_path}")
+    return 1 if fail else 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -286,7 +286,13 @@ class ErasedPipelineTests(unittest.TestCase):
 
             with mock.patch.object(pipeline_erased_ts, "_run", side_effect=fake_run):
                 summary = pipeline_erased_ts.run_project(
-                    source, output, use_agent=True, timeout=19
+                    source,
+                    output,
+                    use_agent=True,
+                    timeout=19,
+                    agent_provider="openai",
+                    agent_model="gpt-test",
+                    agent_base_url="https://api.example.test/v1/",
                 )
 
             infer_command = next(command for command in commands if "ast2type.ts" in command)
@@ -294,12 +300,31 @@ class ErasedPipelineTests(unittest.TestCase):
             self.assertEqual(infer_command[infer_command.index("-o") + 1], str(inference))
             self.assertIn("--sourcedir", infer_command)
             self.assertIn("--agent", infer_command)
+            self.assertEqual(
+                infer_command[infer_command.index("--agent-provider") + 1],
+                "openai",
+            )
+            self.assertEqual(
+                infer_command[infer_command.index("--agent-model") + 1],
+                "gpt-test",
+            )
+            self.assertEqual(
+                infer_command[infer_command.index("--agent-base-url") + 1],
+                "https://api.example.test/v1",
+            )
             self.assertNotIn("-g", infer_command)
             self.assertNotIn("--groundtruth", infer_command)
             self.assertEqual(summary["mode"], "agent")
+            self.assertEqual(summary["agentProvider"], "openai")
+            self.assertEqual(summary["agentModel"], "gpt-test")
             self.assertEqual(
                 json.loads((inference / pipeline_erased_ts.INFERENCE_MANIFEST).read_text()),
-                pipeline_erased_ts._manifest(True),
+                pipeline_erased_ts._manifest(
+                    True,
+                    "openai",
+                    "gpt-test",
+                    "https://api.example.test/v1",
+                ),
             )
 
     def test_reuse_requires_identical_sources_and_the_same_mode(self):
@@ -319,6 +344,29 @@ class ErasedPipelineTests(unittest.TestCase):
             pipeline_erased_ts._assert_compatible_inference(inference, use_agent=False)
             with self.assertRaisesRegex(RuntimeError, "cannot reuse standard inference"):
                 pipeline_erased_ts._assert_compatible_inference(inference, use_agent=True)
+
+            pipeline_erased_ts._write_manifest(
+                inference,
+                use_agent=True,
+                agent_provider="openai",
+                agent_model="gpt-test",
+                agent_base_url="https://api.example.test/v1",
+            )
+            pipeline_erased_ts._assert_compatible_inference(
+                inference,
+                use_agent=True,
+                agent_provider="openai",
+                agent_model="gpt-test",
+                agent_base_url="https://api.example.test/v1/",
+            )
+            with self.assertRaisesRegex(RuntimeError, "different API configuration"):
+                pipeline_erased_ts._assert_compatible_inference(
+                    inference,
+                    use_agent=True,
+                    agent_provider="openai",
+                    agent_model="another-model",
+                    agent_base_url="https://api.example.test/v1",
+                )
 
             (previous / "index.ts").write_bytes(b"export const value = 2;\r\n")
             with self.assertRaisesRegex(RuntimeError, "erased sources changed"):

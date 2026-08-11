@@ -184,6 +184,26 @@ class AstTypeLocatorTests(unittest.TestCase):
 
 
 class AutoFixOrchestrationTests(unittest.TestCase):
+    def test_custom_type_checker_replaces_the_uniform_contract(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "index.ts"
+            source.write_text("export {};\n", encoding="utf-8")
+            calls = []
+
+            def project_check(files, timeout):
+                calls.append((tuple(files), timeout))
+                return TscResult(TscStatus.PASS, 0, "", ("project-tsc",))
+
+            with mock.patch.object(auto_fix, "check_typescript") as uniform_check:
+                result = auto_fix.auto_fix_package(
+                    root, timeout=17, type_checker=project_check
+                )
+
+            self.assertEqual(result.status, auto_fix.AutoFixStatus.PASS)
+            self.assertEqual(calls, [((str(source.resolve()),), 17)])
+            uniform_check.assert_not_called()
+
     def test_package_discovery_reuses_the_shared_typescript_contract(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

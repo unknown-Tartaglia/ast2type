@@ -100,6 +100,31 @@ class TypeScriptContractConfigurationTests(unittest.TestCase):
 
 
 class TypeScriptContractExecutionTests(unittest.TestCase):
+    def test_project_contract_uses_selected_config_compiler_and_working_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            config = project / "evaluation.json"
+            config.write_text("{}\n", encoding="utf-8")
+            completed = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="", stderr=""
+            )
+            with mock.patch.object(
+                tsc_check.subprocess, "run", return_value=completed
+            ) as run_tsc:
+                result = tsc_check.check_typescript_project(
+                    project,
+                    compiler=project / "node_modules" / ".bin" / "tsc",
+                    config=config.name,
+                    extra_args=("--types", "node"),
+                    timeout=17,
+                )
+
+            self.assertEqual(result.status, tsc_check.TscStatus.PASS)
+            self.assertEqual(result.command[1:3], ("--project", str(config.resolve())))
+            self.assertEqual(result.command[-2:], ("--types", "node"))
+            self.assertEqual(run_tsc.call_args.kwargs["cwd"], project.resolve())
+            self.assertEqual(run_tsc.call_args.kwargs["timeout"], 17)
+
     def test_normalizes_filters_and_sorts_root_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

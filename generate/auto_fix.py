@@ -10,7 +10,7 @@ import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 from generate.tsc_check import (
     ROOT_DIR,
@@ -68,6 +68,9 @@ class AutoFixResult:
 
 class AutoFixToolError(RuntimeError):
     pass
+
+
+TypeChecker = Callable[[Sequence[str], int], TscResult]
 
 
 def parse_tsc_errors(output: str) -> list[TscError]:
@@ -289,6 +292,7 @@ def _auto_fix_sources(
     package_root: Path,
     max_rounds: int,
     timeout: int,
+    type_checker: TypeChecker | None = None,
 ) -> AutoFixResult:
     files = sorted({
         str(Path(source).resolve())
@@ -309,7 +313,12 @@ def _auto_fix_sources(
             skipped_diagnostics=0,
         )
 
-    current = check_typescript(files, timeout=timeout)
+    def run_check() -> TscResult:
+        if type_checker is not None:
+            return type_checker(files, timeout)
+        return check_typescript(files, timeout=timeout)
+
+    current = run_check()
     checks = 1
     initial_status = _auto_status(current.status)
     initial_diagnostics = _diagnostic_count(current)
@@ -363,7 +372,7 @@ def _auto_fix_sources(
             replacements += round_replacements
             fix_rounds += 1
 
-            current = check_typescript(files, timeout=timeout)
+            current = run_check()
             checks += 1
             if current.status is not TscStatus.TYPE_ERROR:
                 break
@@ -401,17 +410,21 @@ def auto_fix_file(
     ts_path: str | os.PathLike[str],
     max_rounds: int = 5,
     timeout: int = 120,
+    type_checker: TypeChecker | None = None,
 ) -> AutoFixResult:
     path = Path(ts_path).resolve()
     files = [str(path)] if path.is_file() and is_typescript_source(path) else []
-    return _auto_fix_sources(files, path.parent, max_rounds, timeout)
+    return _auto_fix_sources(
+        files, path.parent, max_rounds, timeout, type_checker
+    )
 
 
 def auto_fix_package(
     package_dir: str | os.PathLike[str],
     max_rounds: int = 5,
     timeout: int = 120,
+    type_checker: TypeChecker | None = None,
 ) -> AutoFixResult:
     root = Path(package_dir).resolve()
     files = discover_typescript_files(root)
-    return _auto_fix_sources(files, root, max_rounds, timeout)
+    return _auto_fix_sources(files, root, max_rounds, timeout, type_checker)
