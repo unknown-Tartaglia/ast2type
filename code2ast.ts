@@ -670,6 +670,10 @@ export function writeJsonStream(file: string, obj: any) {
     }
     if (value === null) {
       out.write("null");
+    } else if (typeof value === "bigint") {
+      // JSON has no BigInt primitive. Retain TypeScript literal spelling so
+      // downstream artifacts remain lossless and valid JSON.
+      out.write(JSON.stringify(`${value}n`));
     } else if (Array.isArray(value)) {
       out.write("[");
       level++;

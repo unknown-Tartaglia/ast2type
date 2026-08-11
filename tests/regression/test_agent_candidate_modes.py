@@ -83,6 +83,8 @@ class AgentCandidateModeTests(unittest.TestCase):
         env = os.environ.copy()
         # Candidate discovery must remain testable without contacting the LLM.
         env["DEEPSEEK_API_KEY"] = ""
+        env["OPENAI_API_KEY"] = ""
+        env["AGENT_PROVIDER"] = "deepseek"
         completed = run(
             [
                 "node",

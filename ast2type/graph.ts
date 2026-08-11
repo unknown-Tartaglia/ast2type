@@ -1,8 +1,24 @@
-import { meta, outputDir, solver, tNode, globalVarBindings } from "../ast2type";
+import { meta, outputDir, sourceDir, solver, tNode, globalVarBindings } from "../ast2type";
 import { VarId, TypeId } from "./fact"
 import { NodeState, tNodeStore, DeterminantNodeState } from "./nType";
 import * as path from "path";
 import * as fs from "fs";
+
+function sourceLocation(astFile: string | undefined) {
+    if (!astFile) {
+        return { relapath: "unknown_relapath", file: "unknown_file" };
+    }
+    const marker = `${path.sep}ast${path.sep}`;
+    const markerIndex = astFile.lastIndexOf(marker);
+    if (markerIndex < 0) {
+        return { relapath: "unknown_relapath", file: "unknown_file" };
+    }
+    const relapath = astFile
+        .slice(markerIndex + marker.length)
+        .replace(/\^/g, path.sep)
+        .replace(/\.ast\.json$/, "");
+    return { relapath, file: path.join(sourceDir, relapath) };
+}
 
 export class TypeGraph {
     nodes = new Map<VarId, NodeState>()
@@ -332,8 +348,7 @@ export class TypeGraph {
         const edges: any[] = [];
         const unknownNodes: Set<VarId> = new Set<VarId>();
         for (const [nodeId, state] of this.nodes) {
-            let file = meta.file.get(nodeId);
-            file = file ? path.join(file.split("ast" + require("path").sep)[0].replace("_output", ""), file.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")) : "unknown_file";
+            const { file } = sourceLocation(meta.file.get(nodeId));
             nodes.push({
                 id: nodeId,
                 label: meta.text.get(nodeId) || `var_${nodeId}`,
@@ -356,8 +371,7 @@ export class TypeGraph {
             }
         }
         for (const unk of unknownNodes) {   
-            let file = meta.file.get(unk);
-            file = file ? path.join(file.split("ast" + require("path").sep)[0].replace("_output", ""), file.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")) : "unknown_file";
+            const { file } = sourceLocation(meta.file.get(unk));
             nodes.push({
                 id: unk,
                 label: meta.text.get(unk) || `var_${unk}`,
@@ -377,9 +391,7 @@ export class TypeGraph {
         for (const [nodeId, state] of this.nodes) {
             const id = nodeId;
             const ty = tNode.get(state.val);
-            let file = meta.file.get(id);
-            let relapath = file ? file.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "") : "unknown_relapath";
-            file = file ? path.join(file.split("ast" + require("path").sep)[0].replace("_output", ""), file.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")) : "unknown_file";
+            const { relapath, file } = sourceLocation(meta.file.get(id));
             if (!meta.v8Kind.has(id)) continue;
             if (state.toAnno() === "unknown") continue;
             outJson.push({
@@ -400,9 +412,7 @@ export class TypeGraph {
                 let id = e.from;
                 // 筛选无入边且无类型信息的节点（即完全孤立的节点，可能是某些特殊表达式或标识符），加入未知列表
                 if (this.getFromEdges(id).size === 0 && !this.nodes.has(id)) {
-                    let file = meta.file.get(id);
-                    let relapath = file ? file.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "") : "unknown_relapath";
-                    file = file ? path.join(file.split("ast" + require("path").sep)[0].replace("_output", ""), file.split("ast" + require("path").sep)[1].replace(/\^/g, require("path").sep).replace(/\.ast\.json$/, "")) : "unknown_file";
+                    const { relapath, file } = sourceLocation(meta.file.get(id));
                     unkJson.push({
                         id: id,
                         context: meta.context.get(id) || "",
@@ -803,4 +813,3 @@ class Edge {
         this.cand = cand;
     }
 }
-

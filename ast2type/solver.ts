@@ -1,6 +1,6 @@
 import path from "path";
 import * as fs from "fs";
-import { injectFeedback, meta, outputDir, tNode } from "../ast2type";
+import { injectFeedback, meta, outputDir, sourceDir, tNode } from "../ast2type";
 import { Fact, FactStore, TypeId, VarId } from "./fact"
 import { TypeGraph } from "./graph"
 import { Rule, RuleStore } from "./rule";
@@ -63,10 +63,7 @@ export class Solver {
                 .slice(markerIndex + marker.length)
                 .replace(/\^/g, path.sep)
                 .replace(/\.ast\.json$/, "");
-            file = path.join(
-                astFile.slice(0, markerIndex).replace(/_output([/\\])$/, "$1"),
-                relapath,
-            );
+            file = path.join(sourceDir, relapath);
         }
 
         return {

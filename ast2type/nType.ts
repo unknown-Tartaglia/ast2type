@@ -290,7 +290,9 @@ export class tNodeStore {
                     result = { kind: "primitive", name: t.name };
                     break;
                 case "literal":
-                    result = { kind: "literal", value: t.value };
+                    result = typeof t.value === "bigint"
+                        ? { kind: "literal", value: `${t.value}n`, valueKind: "bigint" }
+                        : { kind: "literal", value: t.value };
                     break;
                 case "array":
                     result = { kind: "array", elementType: helper(t.elementType) };

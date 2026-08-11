@@ -5,6 +5,8 @@
 #   ./make.sh <目录> --prepare         完整流程: 擦除 + AST + 推断
 #   ./make.sh <目录> --agent          确定性 + Agent LLM 推断
 #   ./make.sh <目录> --agent --agent-candidate-mode gt  使用 GT/历史候选模式
+#   ./make.sh <目录> --agent --agent-provider openai     直连 OpenAI Responses API
+#   ./make.sh <目录> --output-dir <目录>                  隔离本次中间产物
 #   ./make.sh <目录> --trace <varId>   追踪某个 varId 的类型变化
 #   ./make.sh <目录> -f <file>         反馈注入模式
 #   ./make.sh <目录> --js              JS 项目模式（跳过擦除阶段）
@@ -21,6 +23,10 @@ if [ $# -eq 0 ]; then
     echo "  --prepare     预处理: 擦除类型标注 + 生成 AST（默认跳过，直接用已有结果）"
     echo "  --agent       Agent LLM 工具调用推断"
     echo "  --agent-candidate-mode <fair|gt>  Agent 候选模式（默认 fair）"
+    echo "  --agent-provider <deepseek|openai>  Agent API provider（默认 deepseek）"
+    echo "  --agent-model <model>               覆盖 provider 默认模型"
+    echo "  --agent-base-url <url>               覆盖 provider API base URL"
+    echo "  --output-dir <dir>                   AST 与推断产物目录（默认使用旧路径）"
     echo "  --trace <id>  追踪某个 varId 的类型变化，输出到 output/trace.json"
     echo "  -f <file>     从 feedback JSON 注入预推断的类型"
     echo ""
@@ -41,6 +47,11 @@ feedback=""
 prepare=false
 js_mode=false
 agent_candidate_mode="fair"
+agent_provider=""
+agent_model=""
+agent_base_url=""
+output_dir=""
+inference_source_dir=""
 shift
 
 while [ $# -gt 0 ]; do
@@ -55,6 +66,38 @@ while [ $# -gt 0 ]; do
                 exit 1
             fi
             agent_candidate_mode="$1"
+            ;;
+        --agent-provider)
+            shift
+            if [ $# -eq 0 ]; then
+                echo "错误: --agent-provider 需要 deepseek 或 openai"
+                exit 1
+            fi
+            agent_provider="$1"
+            ;;
+        --agent-model)
+            shift
+            if [ $# -eq 0 ]; then
+                echo "错误: --agent-model 需要模型名"
+                exit 1
+            fi
+            agent_model="$1"
+            ;;
+        --agent-base-url)
+            shift
+            if [ $# -eq 0 ]; then
+                echo "错误: --agent-base-url 需要 URL"
+                exit 1
+            fi
+            agent_base_url="$1"
+            ;;
+        --output-dir)
+            shift
+            if [ $# -eq 0 ]; then
+                echo "错误: --output-dir 需要目录"
+                exit 1
+            fi
+            output_dir="$1"
             ;;
         --prepare)
             prepare=true
@@ -112,10 +155,17 @@ if [ "$prepare" = true ]; then
         echo "=== JS 模式: 跳过擦除，直接生成 AST ==="
         ast_input="$dir"
     fi
+    inference_source_dir="$ast_input"
 
     # 第二阶段: 生成 AST
     echo "=== 生成 AST ==="
     ast_args=(-i "$ast_input")
+    if [ -n "$output_dir" ]; then
+        # A caller-owned output directory keeps temporary AST files away from
+        # the source dataset and lets independent experiments remain isolated.
+        ast_args+=(-o "$output_dir")
+        input_dir="$output_dir"
+    fi
     if [ "$js_mode" = true ]; then
         # Keep TypeScript declarations from leaking reference types into JS inference.
         ast_args+=(--js-only)
@@ -133,29 +183,44 @@ fi
 echo "=== 类型推断 (模式: $mode) ==="
 gt_arg=()
 [ -n "$gt" ] && [ -f "$gt" ] && gt_arg=(-g "$gt")
+output_arg=()
+[ -n "$output_dir" ] && output_arg=(-o "$output_dir")
+source_arg=()
+[ -n "$inference_source_dir" ] && source_arg=(--sourcedir "$inference_source_dir")
 case "$mode" in
     standard)
         node --max-old-space-size=40960 -r ts-node/register ast2type.ts \
             -i "$input_dir" \
-            "${gt_arg[@]}"
+            "${gt_arg[@]}" \
+            "${output_arg[@]}" \
+            "${source_arg[@]}"
         ;;
     agent)
+        agent_args=(--agent --agent-candidate-mode "$agent_candidate_mode")
+        [ -n "$agent_provider" ] && agent_args+=(--agent-provider "$agent_provider")
+        [ -n "$agent_model" ] && agent_args+=(--agent-model "$agent_model")
+        [ -n "$agent_base_url" ] && agent_args+=(--agent-base-url "$agent_base_url")
         node --max-old-space-size=40960 -r ts-node/register ast2type.ts \
             -i "$input_dir" \
             "${gt_arg[@]}" \
-            --agent \
-            --agent-candidate-mode "$agent_candidate_mode"
+            "${output_arg[@]}" \
+            "${source_arg[@]}" \
+            "${agent_args[@]}"
         ;;
     trace)
         node --max-old-space-size=40960 -r ts-node/register ast2type.ts \
             -i "$input_dir" \
             "${gt_arg[@]}" \
+            "${output_arg[@]}" \
+            "${source_arg[@]}" \
             --trace "$trace_id"
         ;;
     feedback)
         node --max-old-space-size=40960 -r ts-node/register ast2type.ts \
             -i "$input_dir" \
             "${gt_arg[@]}" \
+            "${output_arg[@]}" \
+            "${source_arg[@]}" \
             -f "$feedback"
         ;;
 esac

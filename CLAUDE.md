@@ -30,6 +30,7 @@ npm test
 
 ```bash
 python3 -m unittest tests.regression.test_agent_candidate_modes -v
+python3 -m unittest tests.regression.test_agent_providers -v
 python3 -m unittest tests.regression.test_erased_ts_migration -v
 python3 -m unittest tests.regression.test_tsc_check -v
 python3 -m unittest tests.regression.test_auto_fix -v
@@ -48,6 +49,19 @@ Agent 推导默认使用 `fair` 候选：
 ```bash
 ./make.sh tests/ts/personal --prepare --agent --agent-candidate-mode fair
 ```
+
+Agent API 默认使用 DeepSeek。直接调用 OpenAI Responses API 时设置
+`OPENAI_API_KEY` 并选择 `openai` provider：
+
+```bash
+OPENAI_API_KEY='your-key' ./make.sh tests/ts/personal --prepare --agent \
+  --agent-provider openai
+```
+
+OpenAI 默认模型为 `gpt-4.1-mini`。可通过 `--agent-model` 和
+`--agent-base-url` 覆盖；对应的环境变量为 `AGENT_MODEL`、
+`OPENAI_MODEL`、`AGENT_BASE_URL` 和 `OPENAI_BASE_URL`。API key 只从
+`--api-key` 或当前 provider 对应的 `OPENAI_API_KEY`/`DEEPSEEK_API_KEY` 读取。
 
 旧版/兼容候选集使用 `gt`：
 
@@ -91,7 +105,8 @@ python3 generate/pipeline_erased_ts.py \
 ```
 
 省略 `--agent` 即使用标准推导。只有通过 `--reuse-inference-root` 才允许复用推导；
-复用前必须验证擦除源码逐字节一致，并验证 standard/Agent 模式 manifest 一致。
+复用前必须验证擦除源码逐字节一致，并验证 standard/Agent 模式以及 Agent provider、
+model、base URL 的 manifest 一致。
 
 ### 统一 TypeScript 编译
 

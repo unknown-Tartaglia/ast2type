@@ -12,6 +12,11 @@ import {
 import { tNodeStore } from "./ast2type/nType";
 import { DeterminantStrategy } from "./ast2type/strategy";
 import { RuleStore } from "./ast2type/rule";
+import {
+  getAgentApiKeyEnvName,
+  resolveAgentConfig,
+  type AgentConfig,
+} from "./agent/net";
 
 
 // 命令行参数解析
@@ -24,8 +29,11 @@ program
   .option("--agent", "Enable LLM agent to infer unknown declaration types in-loop")
   .option("--agent-feedback <path>", "Replay cached Agent feedback at the in-loop injection stage")
   .option("--agent-candidate-mode <mode>", "Agent candidates: fair (GT-independent declarations) or gt (legacy graph candidates)", "fair")
+  .option("--agent-provider <provider>", "Agent API provider: deepseek (default) or openai")
+  .option("--agent-model <model>", "Override the provider's default model")
+  .option("--agent-base-url <url>", "Override the provider's API base URL")
   .option("--sourcedir <dir>", "Erased source directory for agent (auto-derived if omitted)")
-  .option("--api-key <key>", "API key for agent (or set DEEPSEEK_API_KEY env var)")
+  .option("--api-key <key>", "API key for agent (or set the provider-specific environment variable)")
   .option("--trace <varId>", "Trace type changes for a specific varId, output to trace.json")
 program.parse(process.argv);
 
@@ -41,8 +49,29 @@ if (agentCandidateModeRaw !== "fair" && agentCandidateModeRaw !== "gt") {
   program.error(`Invalid --agent-candidate-mode "${agentCandidateModeRaw}"; expected fair or gt`);
 }
 const agentCandidateMode = agentCandidateModeRaw as AgentCandidateMode;
-const agentApiKey: string = options.apiKey || process.env.DEEPSEEK_API_KEY || "";
+let agentConfig: AgentConfig | undefined;
+// Cached feedback replay does not need a provider or live API credentials.
+if (agentMode && !agentFeedbackOption) {
+  try {
+    agentConfig = resolveAgentConfig({
+      provider: options.agentProvider,
+      model: options.agentModel,
+      baseUrl: options.agentBaseUrl,
+      apiKey: options.apiKey,
+    });
+  } catch (error) {
+    program.error(error instanceof Error ? error.message : String(error));
+  }
+}
 const sourcedirOption: string | undefined = options.sourcedir ? path.resolve(options.sourcedir) : undefined;
+// AST files can live in a caller-owned work directory. Keep the real source
+// root explicit so graph artifacts and Agent requests never guess from it.
+const sourceDir: string = sourcedirOption || (() => {
+  const last = path.basename(inputDir);
+  return last.endsWith("_output")
+    ? path.join(path.dirname(inputDir), last.replace(/_output$/, ""))
+    : inputDir;
+})();
 const traceTarget: number | null = options.trace ? parseInt(options.trace, 10) : null;
 
 const LOG_SCOPE = false; // 是否开启日志作用域
@@ -69,6 +98,14 @@ interface AstNode {
   varId?: number;
   position?: { start: { line: number; character: number }; end: { line: number; character: number } };
   offset: number;
+}
+
+function parseBigIntLiteralText(text: string | undefined): bigint {
+  // TypeScript AST tokens retain the source suffix and numeric separators,
+  // while the JavaScript BigInt constructor accepts neither form.
+  const raw = (text ?? "0").trim();
+  const withoutSuffix = raw.endsWith("n") ? raw.slice(0, -1) : raw;
+  return BigInt(withoutSuffix.replace(/_/g, "") || "0");
 }
 
 // 全局结构
@@ -930,7 +967,7 @@ function secondPass(filePath: string, node: AstNode) {
       meta.v8Kind.set(node.varId!, "Literal");
     },
     BigIntLiteral(node) {
-      emit.allocLiteral(node.varId!, BigInt(node.text ?? "0"));
+      emit.allocLiteral(node.varId!, parseBigIntLiteralText(node.text));
       meta.v8Kind.set(node.varId!, "Literal");
     },
     RegularExpressionLiteral(node) {
@@ -1563,7 +1600,7 @@ function astTypeToTypeId(node: AstNode): TypeId | null {
       else if (literal.kind === "TrueKeyword") value = true;
       else if (literal.kind === "FalseKeyword") value = false;
       else if (literal.kind === "NullKeyword") value = null;
-      else if (literal.kind === "BigIntLiteral") value = BigInt(literal.text ?? "0");
+      else if (literal.kind === "BigIntLiteral") value = parseBigIntLiteralText(literal.text);
       if (value === undefined) return null;
       return tNode.newTypeNode({ kind: "literal", value });
     }
@@ -1749,6 +1786,9 @@ async function main() {
         console.log(`[agent] 从缓存读取 ${feedback.length} 条推断`);
       }
     } else {
+      if (!agentConfig) {
+        throw new Error("Agent configuration is unavailable");
+      }
       const unkSpots = solver.getUnkInfo(agentCandidateMode);
       const candidateOut = path.join(outputDir, "agent-candidates.json");
       writeJsonStream(candidateOut, {
@@ -1758,17 +1798,10 @@ async function main() {
       console.log(`[agent] 候选模式: ${agentCandidateMode}`);
       console.log(`[agent] 收集 ${unkSpots.length} 个未知声明槽，写入 ${candidateOut}`);
 
-      if (!agentApiKey) {
-        console.warn("Agent mode enabled but no API key set (use --api-key or DEEPSEEK_API_KEY). Skipping inference.");
+      if (!agentConfig.apiKey) {
+        const envName = getAgentApiKeyEnvName(agentConfig.provider);
+        console.warn(`Agent mode enabled but no API key set (use --api-key or ${envName}). Skipping inference.`);
       } else if (unkSpots.length > 0) {
-        // 推导源码目录
-        const sourceDir = sourcedirOption || (() => {
-          // 约定：input 是 ${dir}_erase_output，则源码在 ${dir}_erase
-          const last = path.basename(inputDir);
-          return last.endsWith("_output")
-            ? path.join(path.dirname(inputDir), last.replace(/_output$/, ""))
-            : inputDir;
-        })();
         const sourceSpots = unkSpots.map(spot => spot.relapath === "unknown_relapath"
           ? spot
           : { ...spot, file: path.join(sourceDir, spot.relapath) });
@@ -1777,7 +1810,7 @@ async function main() {
         const { inferTypes } = await import("./agent/infer");
         feedback = await inferTypes(
           sourceSpots,
-          agentApiKey,
+          agentConfig,
           30,
           (file, done, total) => {
             if (done >= total) {
@@ -1816,4 +1849,4 @@ function getAstFiles(dir: string): string[] {
 
 main();
 
-export {tNode, solver, outputDir, meta, injectFeedback, globalVarBindings};
+export {tNode, solver, outputDir, sourceDir, meta, injectFeedback, globalVarBindings};
