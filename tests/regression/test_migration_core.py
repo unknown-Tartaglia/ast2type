@@ -241,6 +241,7 @@ class MigrationCoreTests(unittest.TestCase):
                   object: renderType({ kind: 'object', properties: { name: { kind: 'primitive', name: 'string' } } }),
                   array: renderType({ kind: 'array', elementType: { kind: 'union', types: ['string', 'number'] } }),
                   optional: renderType({ kind: 'union', types: ['string', 'undefined'] }),
+                  optionalParam: renderType({ kind: 'function', params: [{ name: 'value', type: { kind: 'union', types: ['string', 'undefined'] } }], returnType: 'void' }),
                 }));
                 """,
                 {"TEST_ROOT": str(root)},
@@ -254,6 +255,7 @@ class MigrationCoreTests(unittest.TestCase):
             self.assertEqual(result["object"], "{ name: string }")
             self.assertEqual(result["array"], "(string | number)[]")
             self.assertEqual(result["optional"], "string | undefined")
+            self.assertEqual(result["optionalParam"], "(value: string) => void")
 
     def test_javascript_migration_normalizes_compatibility_constructs(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -448,6 +450,35 @@ class MigrationCoreTests(unittest.TestCase):
             self.assertEqual(result["rounds"][0]["accepted"], 0)
             self.assertIn("JSON", result["rounds"][0]["error"])
             self.assertEqual(source.read_text(encoding="utf-8"), original)
+
+    def test_type_predicate_uses_real_parameter_and_fallback_alias(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "index.js"
+            source.write_text(
+                "export function isWidget(value) { return typeof value === 'object'; }\n",
+                encoding="utf-8",
+            )
+            result = self.run_node(
+                """
+                const fs = require('fs');
+                const path = require('path');
+                const { weaveJavaScript } = require('./src/migration/js');
+                const file = path.join(process.env.TEST_ROOT, 'index.js');
+                const woven = weaveJavaScript(process.env.TEST_ROOT, { nodes: [{
+                  id: 1,
+                  file,
+                  position: { start: { line: 1, character: 1 } },
+                  fullType: JSON.stringify({ id: 1, kind: 'function', name: 'isWidget',
+                    params: [{ name: 'value', type: 'unknown' }],
+                    returnType: 'value is Widget' }),
+                }] });
+                console.log(JSON.stringify(woven.files.get('index.js')));
+                """,
+                {"TEST_ROOT": str(root)},
+            )
+            self.assertIn("type Widget = any;", result)
+            self.assertIn("isWidget(value: unknown) : value is Widget", result)
 
 
 if __name__ == "__main__":

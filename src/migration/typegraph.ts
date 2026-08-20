@@ -37,6 +37,7 @@ export function parseFullType(value: unknown): FullType | undefined {
 
 export function validType(typeText: string): boolean {
   if (!typeText.trim()) return false;
+  if (/^(?:asserts\s+)?[A-Za-z_$][\w$]*\s+is\s+.+$/.test(typeText.trim())) return true;
   const source = ts.createSourceFile(
     "__ast2type_type.ts",
     `type __Ast2TypeProbe = ${typeText};`,
@@ -50,7 +51,7 @@ export function validType(typeText: string): boolean {
 
 function namedType(value: string): string {
   if (value === "undefined") return "undefined";
-  if (value === "unknown") return "any";
+  if (value === "unknown") return "unknown";
   if (value === "PromiseConstructor") return "Promise<any>";
   if (!value || /^obj_\d+$/.test(value) || /^new\s*(?:\(|\s)/.test(value)
     || /\)\s*:\s+\w/.test(value) || !validType(value)) return "any";
@@ -61,7 +62,7 @@ function renderPropertyName(value: string): string {
   return /^[A-Za-z_$][\w$]*$/.test(value) ? value : JSON.stringify(value);
 }
 
-export function renderType(value: unknown): string {
+export function renderType(value: unknown, stripUndefined = false): string {
   if (typeof value === "string") return namedType(value);
   const type = parseFullType(value);
   if (!type) return "any";
@@ -83,7 +84,9 @@ export function renderType(value: unknown): string {
     }
     case "union": {
       const parts = Array.isArray(type.types)
-        ? type.types.map(renderType)
+        ? type.types
+          .filter(member => !stripUndefined || !(typeof member === "string" && member === "undefined"))
+          .map(member => renderType(member, stripUndefined))
         : [];
       return parts.length ? [...new Set(parts)].join(" | ") : "undefined";
     }
@@ -94,6 +97,7 @@ export function renderType(value: unknown): string {
         if (members.length) return `{ ${members.join("; ")} }`;
       }
       const name = typeof type.name === "string" ? type.name : "object";
+      if (/^(?:asserts\s+)?[A-Za-z_$][\w$]*\s+is\s+.+$/.test(name)) return name;
       return !name || name === "object" || /^obj_\d+$/.test(name) ? "any" : namedType(name);
     }
     case "function": {
@@ -101,7 +105,7 @@ export function renderType(value: unknown): string {
       const rendered = parameters.map((parameter, index) => {
         const item = parameter && typeof parameter === "object" ? parameter as FullType : {};
         const name = typeof item.name === "string" && item.name ? item.name : `arg${index}`;
-        return `${name}: ${renderType(item.type)}`;
+        return `${name}: ${renderType(item.type, true)}`;
       });
       return `(${rendered.join(", ")}) => ${renderType(type.returnType ?? { kind: "primitive", name: "void" })}`;
     }
@@ -160,9 +164,13 @@ export function canonicalFunctionTargets(typegraph: TypeGraph): { targets: Funct
       name: typeof fullType.name === "string" ? fullType.name : "",
       parameterTypes: parameters.map(parameter => {
         const item = parameter && typeof parameter === "object" ? parameter as FullType : {};
-        return renderType(item.type);
+        return renderType(item.type, true);
       }),
-      returnType: renderType(fullType.returnType),
+      // TypeWeaver's function-signature comparator treats optional/default
+      // return paths as the declared value type; omit only an undefined member
+      // from the rendered return union, while preserving explicit unions in
+      // standalone values.
+      returnType: renderType(fullType.returnType, true),
     });
   }
   targets.sort((left, right) => left.file.localeCompare(right.file) || left.id - right.id);

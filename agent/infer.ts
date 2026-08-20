@@ -10,6 +10,33 @@ import type { AgentFeedbackEntry, UnkSpot } from "../ast2type/solver";
 import { setupProxy, chat, supportsOpenAIStructuredOutput } from "./net";
 import type { AgentConfig } from "./net";
 
+function packageContext(file: string): string {
+  let current = path.dirname(file);
+  for (;;) {
+    try {
+      const packageJson = JSON.parse(fs.readFileSync(path.join(current, "package.json"), "utf8"));
+      const fields = ["name", "version", "description", "main", "module", "types", "keywords"];
+      const selected = Object.fromEntries(
+        fields.filter(field => packageJson[field] !== undefined)
+          .map(field => [field, packageJson[field]]),
+      );
+      for (const readme of ["README.md", "readme.md", "README"]) {
+        try {
+          selected.readme = fs.readFileSync(path.join(current, readme), "utf8").slice(0, 6000);
+          break;
+        } catch {
+          // Try the next conventional README name.
+        }
+      }
+      return JSON.stringify(selected);
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return "{}";
+      current = parent;
+    }
+  }
+}
+
 /**
  * OpenAI Structured Outputs 要求根节点是 object，不能直接以数组作为根节点。
  * Schema 保持跨批次完全一致，便于服务端复用 schema 与 prompt 缓存。
@@ -39,13 +66,14 @@ function buildPrompt(
   spots: UnkSpot[],
   sourceCode: string,
   structuredOutput: boolean,
+  projectContext: string,
 ): string {
   const list = spots
     .sort((a, b) => (a.pos?.line ?? 0) - (b.pos?.line ?? 0))
     .map(
       (s) => {
         const loc = s.pos ? `line ${s.pos.line}, col ${s.pos.column}` : `offset ${s.location}`;
-        return `- id=${s.id}, slot=${s.slot}, currentType=${s.type}, ${loc}, context="${s.context}", expr="${s.exprText}", exprKind="${s.exprKind}", morphKind="${s.morphKind}"`;
+        return `- id=${s.id}, slot=${s.slot}, currentType=${s.type}, refinable=${Boolean(s.refinable)}, ${loc}, context="${s.context}", expr="${s.exprText}", exprKind="${s.exprKind}", morphKind="${s.morphKind}"`;
       }
     )
     .join("\n");
@@ -64,6 +92,12 @@ function buildPrompt(
 ${sourceCode}
 \`\`\`
 
+## 项目上下文
+这是源文件所属 npm 包的 package.json 摘要，可用于判断公开 API 的惯用类型名称：
+\`\`\`json
+${projectContext}
+\`\`\`
+
 ## 节点（需要推断类型）
 ${list}
 
@@ -78,6 +112,8 @@ ${outputExample}
 
 规则：
 - currentType=any 表示基础求解器的保守结果；只有有充分证据时才将它改成具体类型，不能原样返回 any
+- refinable=true 且 slot=return 时，当前 boolean 可能是被擦除的类型谓词；如果源码是类型守卫，返回如 "value is Stream"，否则返回 boolean
+- 类型谓词的目标类型只写在 slot=return；如果源码没有声明或 import 该目标类型，不要把同名目标类型臆造到参数上，参数保留当前 unknown 或使用源码证据支持的类型
 - 尽可能精确推断，避免使用 any/object/unknown 除非确实无法推断
 - slot=value 时输出该声明本身的类型；slot=return 时只输出函数返回类型，不要输出完整函数签名
 - 必须原样返回每个节点的 id 和 slot
@@ -130,7 +166,7 @@ async function processBatch(
     const msg = await chat(config, {
       messages: [{
         role: "user",
-        content: buildPrompt(spots, source, structuredOutput),
+        content: buildPrompt(spots, source, structuredOutput, packageContext(file)),
       }],
       structuredOutput: structuredOutput
         ? { name: "type_feedback", schema: OPENAI_FEEDBACK_SCHEMA }
@@ -161,7 +197,7 @@ async function processBatch(
           id: spot.id,
           slot: spot.slot,
           type: entry.type.trim(),
-          ...(spot.type === "any" ? { refine: true } : {}),
+          ...(spot.refinable || spot.type === "any" || spot.type === "unknown" ? { refine: true } : {}),
         });
       } else {
         console.warn(`[agent] 跳过非法类型 "${entry.type}" for id=${entry.id}`);

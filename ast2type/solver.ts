@@ -19,6 +19,8 @@ export interface UnkSpot {
   pos: { line: number; column: number } | null;
   /** 当前求解器结果；refine-any 模式也会把 any 交给 Agent 复核。 */
   type: "unknown" | "any";
+  /** 该槽位是已知基础类型，但允许 Agent 提供更精确的语法类型。 */
+  refinable?: boolean;
   relapath: string;
   file: string;
 }
@@ -78,7 +80,7 @@ export class Solver {
         return false;
     }
 
-    private buildUnkSpot(id: VarId, slot: AgentCandidateSlot): UnkSpot {
+    private buildUnkSpot(id: VarId, slot: AgentCandidateSlot, refinable = false): UnkSpot {
         const astFile = meta.file.get(id);
         const marker = `ast${path.sep}`;
         const markerIndex = astFile?.lastIndexOf(marker) ?? -1;
@@ -114,6 +116,7 @@ export class Solver {
             location: meta.offset.get(id) ?? -1,
             pos: meta.pos.get(id) || null,
             type: currentType,
+            refinable,
             relapath,
             file,
         };
@@ -137,11 +140,11 @@ export class Solver {
         }
 
         const seen = new Set<string>();
-        const addSpot = (id: VarId, slot: AgentCandidateSlot) => {
+        const addSpot = (id: VarId, slot: AgentCandidateSlot, refinable = false) => {
             const key = `${id}:${slot}`;
             if (seen.has(key)) return;
             seen.add(key);
-            spots.push(this.buildUnkSpot(id, slot));
+            spots.push(this.buildUnkSpot(id, slot, refinable));
         };
 
         for (const [declarationId, kind] of meta.declKind) {
@@ -167,6 +170,11 @@ export class Solver {
                 || (refineAny && this.isOpaqueType(functionType.returnType))
             )) {
                 addSpot(functionId, "return");
+            } else if (functionType?.kind === "function"
+                && refineAny && functionType.returnType === tNode.BOOLEAN) {
+                // Boolean guards are often erased type predicates (e.g.
+                // `value is Stream`); ask the Agent to refine only this slot.
+                addSpot(functionId, "return", true);
             }
         }
 
@@ -182,13 +190,25 @@ export class Solver {
                 ordinaryFeedback.push(entry);
                 continue;
             }
-            const typeId = tNode.parseTypeString(entry.type);
-            if (typeId === null || typeId === tNode.UNKNOWN) {
+            const typeId = tNode.parseTypeString(entry.type, {
+                allowOpaqueGenerics: true,
+                allowTypePredicates: true,
+            });
+            // Explicit Agent refinements may replace a conservative `any` with
+            // `unknown`; ordinary feedback keeps unsupported types non-binding.
+            if (typeId === null || (typeId === tNode.UNKNOWN && !entry.refine)) {
                 ordinaryFeedback.push(entry);
                 continue;
             }
             const state = this.graph.nodes.get(entry.id);
             if (!state) {
+                // An unbound declaration is represented by an absent graph
+                // state.  A refined value is still actionable: seed the node
+                // directly so later rules can propagate it.
+                if ((entry.slot ?? "value") === "value") {
+                    replaceable.set(entry.id, this.strategy.newNodeState(typeId));
+                    continue;
+                }
                 ordinaryFeedback.push(entry);
                 continue;
             }
@@ -198,7 +218,12 @@ export class Solver {
             }
             if ((entry.slot ?? "value") === "return") {
                 const functionType = tNode.get(state.val);
-                if (functionType?.kind === "function" && this.isOpaqueType(functionType.returnType)) {
+                const feedbackType = tNode.get(typeId);
+                const isPredicate = feedbackType?.kind === "object"
+                    && typeof feedbackType.name === "string"
+                    && /^(?:asserts\s+)?[A-Za-z_$][\w$]*\s+is\s+/.test(feedbackType.name);
+                if (functionType?.kind === "function"
+                    && (this.isOpaqueType(functionType.returnType) || isPredicate)) {
                     const replacement = tNode.newTypeNode({ ...functionType, returnType: typeId });
                     replaceable.set(entry.id, this.strategy.newNodeState(replacement));
                     continue;

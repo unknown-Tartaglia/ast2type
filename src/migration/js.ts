@@ -237,12 +237,47 @@ function injectNodeGlobals(content: string, file: string): string {
 function normalizeCompatibility(content: string, file: string): { content: string; normalized: boolean; globals: boolean } {
   const classFields = addClassFields(content, file);
   const defaultExport = normalizeDefaultExport(classFields, file);
-  const withGlobals = injectNodeGlobals(defaultExport, file);
+  const withPredicateTypes = injectPredicateFallbackTypes(defaultExport);
+  const withGlobals = injectNodeGlobals(withPredicateTypes, file);
   return {
     content: withGlobals,
-    normalized: defaultExport !== content,
-    globals: withGlobals !== defaultExport,
+    normalized: withPredicateTypes !== content,
+    globals: withGlobals !== withPredicateTypes,
   };
+}
+
+/**
+ * A type predicate can name a public type that was erased from a JavaScript
+ * source file.  Keep the predicate in the emitted declaration, but provide a
+ * local fallback alias so the migrated implementation still type-checks.
+ * Existing declarations/imports always win; qualified names are skipped.
+ */
+function injectPredicateFallbackTypes(content: string): string {
+  const names = new Set<string>();
+  const declared = new Set<string>();
+  const declarationPattern = /\b(?:type|interface|class|enum|function|const|let|var)\s+([A-Za-z_$][\w$]*)/g;
+  for (const match of content.matchAll(declarationPattern)) declared.add(match[1]);
+  const importPattern = /\bimport\s+(?:type\s+)?(?:\{([^}]+)\}|([A-Za-z_$][\w$]*))/g;
+  for (const match of content.matchAll(importPattern)) {
+    for (const item of (match[1] ?? match[2] ?? "").split(",")) {
+      const name = item.trim().split(/\s+as\s+/).pop()?.trim();
+      if (name) declared.add(name);
+    }
+  }
+  const predicatePattern = /\b[A-Za-z_$][\w$]*\s+is\s+([A-Za-z_$][\w$]*)\b/g;
+  for (const match of content.matchAll(predicatePattern)) {
+    if (!declared.has(match[1])) names.add(match[1]);
+  }
+  if (!names.size) return content;
+  const aliases = [...names].map(name => `type ${name} = any;`).join("\n") + "\n";
+  let position = 0;
+  if (content.startsWith("#!")) {
+    const newline = content.indexOf("\n");
+    position = newline < 0 ? content.length : newline + 1;
+  }
+  const directive = content.slice(position).match(/^(?:\s*)(["']use strict["'];\s*)/);
+  if (directive) position += directive[0].length;
+  return content.slice(0, position) + aliases + content.slice(position);
 }
 
 function editsForFunction(
@@ -272,6 +307,12 @@ function editsForFunction(
 
   if (!ts.isConstructorDeclaration(node) && !ts.isSetAccessorDeclaration(node) && !node.type) {
     let returnType = target.returnType.trim();
+    const predicate = returnType.match(/^(asserts\s+)?([A-Za-z_$][\w$]*)\s+is\s+(.+)$/);
+    const firstParameter = node.parameters[0]?.name;
+    if (predicate && firstParameter && ts.isIdentifier(firstParameter)) {
+      const assertion = predicate[1] ?? "";
+      returnType = `${assertion}${firstParameter.text} is ${predicate[3]}`;
+    }
     if (!validType(returnType)) returnType = "any";
     const async = node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword);
     if (async && !/^Promise\s*</.test(returnType)) {

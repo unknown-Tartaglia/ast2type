@@ -17,6 +17,8 @@ export class tNodeStore {
     private _synthObjId = 100000;
     /** Agent 反馈可以保留内部图无法建模但语法合法的泛型文本；GT 仍保持保守解析。 */
     private allowOpaqueGenerics = false;
+    /** Agent 反馈可以保留返回位置的 TypeScript 类型谓词文本。 */
+    private allowTypePredicates = false;
 
     constructor() {
         // 预定义一些基础类型
@@ -389,7 +391,7 @@ export class tNodeStore {
     }
 
     /** 将 ground truth/feedback 类型转换为内部类型；无法完整表达时返回 UNKNOWN。 */
-    parseTypeString(raw: string, options: { allowOpaqueGenerics?: boolean } = {}): TypeId | null {
+    parseTypeString(raw: string, options: { allowOpaqueGenerics?: boolean; allowTypePredicates?: boolean } = {}): TypeId | null {
         // TypeScript 没有独立解析 TypeNode 的公开入口，放进返回类型可复用完整类型语法。
         // 同时要求文件中只有这一条声明，避免 raw 用分号追加其他语句后仍被部分接受。
         const sourceFile = ts.createSourceFile(
@@ -411,11 +413,14 @@ export class tNodeStore {
         }
 
         const previous = this.allowOpaqueGenerics;
+        const previousPredicates = this.allowTypePredicates;
         this.allowOpaqueGenerics = options.allowOpaqueGenerics === true;
+        this.allowTypePredicates = options.allowTypePredicates === true;
         try {
             return this._fromTypeScriptType(statements[0].type) ?? this.UNKNOWN;
         } finally {
             this.allowOpaqueGenerics = previous;
+            this.allowTypePredicates = previousPredicates;
         }
     }
 
@@ -465,6 +470,11 @@ export class tNodeStore {
 
         if (ts.isTypePredicateNode(node)) {
             // 内部模型不记录谓词目标，但其运行时返回值仍可准确表示为 boolean。
+            if (this.allowTypePredicates) {
+                return this.newTypeNode({
+                    kind: "object", name: node.getText(), id: ++this._synthObjId, properties: {},
+                });
+            }
             return node.assertsModifier ? null : this.BOOLEAN;
         }
 
@@ -583,6 +593,16 @@ export class tNodeStore {
             }
             return this.newTypeNode({
                 kind: "object", name, id: ++this._synthObjId, properties: {},
+            });
+        }
+
+        if (ts.isImportTypeNode(node)) {
+            // Agent feedback may legitimately refer to a type exported by a
+            // sibling module. The graph cannot resolve module symbols, but the
+            // original TypeScript text is still safer than dropping it to any.
+            if (!this.allowOpaqueGenerics) return null;
+            return this.newTypeNode({
+                kind: "object", name: node.getText(), id: ++this._synthObjId, properties: {},
             });
         }
 
