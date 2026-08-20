@@ -29,6 +29,7 @@ program
   .option("--agent", "Enable LLM agent to infer unknown declaration types in-loop")
   .option("--agent-refine-any", "Also ask Agent to refine any parameter and return slots")
   .option("--agent-signature-only", "Only ask Agent about function parameters and returns")
+  .option("--agent-batch-size <number>", "Agent declarations per request", "30")
   .option("--agent-feedback <path>", "Replay cached Agent feedback at the in-loop injection stage")
   .option("--agent-candidate-mode <mode>", "Agent candidates: fair (GT-independent declarations) or gt (legacy graph candidates)", "fair")
   .option("--agent-provider <provider>", "Agent API provider: deepseek (default) or openai")
@@ -47,6 +48,7 @@ const feedbackOption: string | undefined = options.feedback ? path.resolve(optio
 const agentMode: boolean = !!options.agent;
 const agentRefineAny: boolean = !!options.agentRefineAny;
 const agentSignatureOnly: boolean = !!options.agentSignatureOnly;
+const agentBatchSize: number = Number(options.agentBatchSize ?? 30);
 const agentFeedbackOption: string | undefined = options.agentFeedback ? path.resolve(options.agentFeedback) : undefined;
 const agentCandidateModeRaw: string = options.agentCandidateMode;
 if (agentCandidateModeRaw !== "fair" && agentCandidateModeRaw !== "gt") {
@@ -1817,7 +1819,7 @@ async function main() {
         feedback = await inferTypes(
           sourceSpots,
           agentConfig,
-          30,
+          agentBatchSize,
           (file, done, total) => {
             if (done >= total) {
               console.log(`[agent] ${file}: ${done}/${total}`);

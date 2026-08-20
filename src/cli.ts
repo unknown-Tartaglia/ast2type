@@ -57,6 +57,7 @@ program.command("migrate-js")
   .option("--candidate-mode <mode>", "fair or gt", "fair")
   .option("--agent-refine-any", "also refine any parameter and return slots")
   .option("--agent-signature-only", "only ask Agent about function parameters and returns")
+  .option("--agent-batch-size <number>", "Agent declarations per request", "30")
   .option("--agent-provider <provider>")
   .option("--agent-model <model>")
   .option("--agent-base-url <url>")
@@ -76,6 +77,7 @@ program.command("migrate-js")
       candidateMode: options.candidateMode,
       refineAny: Boolean(options.agentRefineAny),
       signatureOnly: Boolean(options.agentSignatureOnly),
+      agentBatchSize: Number(options.agentBatchSize),
       provider: options.agentProvider,
       model: options.agentModel,
       baseUrl: options.agentBaseUrl,
@@ -97,6 +99,7 @@ program.command("migrate-ts")
   .option("--candidate-mode <mode>", "fair or gt", "fair")
   .option("--agent-refine-any", "also refine any parameter and return slots")
   .option("--agent-signature-only", "only ask Agent about function parameters and returns")
+  .option("--agent-batch-size <number>", "Agent declarations per request", "30")
   .option("--agent-provider <provider>")
   .option("--agent-model <model>")
   .option("--agent-base-url <url>")
@@ -116,6 +119,7 @@ program.command("migrate-ts")
       candidateMode: options.candidateMode,
       refineAny: Boolean(options.agentRefineAny),
       signatureOnly: Boolean(options.agentSignatureOnly),
+      agentBatchSize: Number(options.agentBatchSize),
       provider: options.agentProvider,
       model: options.agentModel,
       baseUrl: options.agentBaseUrl,

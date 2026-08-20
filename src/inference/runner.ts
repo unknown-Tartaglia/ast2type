@@ -15,6 +15,7 @@ export interface InferenceOptions {
   candidateMode?: AgentCandidateMode;
   refineAny?: boolean;
   signatureOnly?: boolean;
+  agentBatchSize?: number;
   provider?: string;
   model?: string;
   baseUrl?: string;
@@ -61,6 +62,7 @@ export function inferProject(options: InferenceOptions): InferenceResult {
     args.push("--agent", "--agent-candidate-mode", options.candidateMode ?? "fair");
     if (options.refineAny) args.push("--agent-refine-any");
     if (options.signatureOnly) args.push("--agent-signature-only");
+    if (options.agentBatchSize !== undefined) args.push("--agent-batch-size", String(options.agentBatchSize));
     if (options.provider) args.push("--agent-provider", options.provider);
     if (options.model) args.push("--agent-model", options.model);
     if (options.baseUrl) args.push("--agent-base-url", options.baseUrl);

@@ -17,6 +17,7 @@ export interface MigrateJavaScriptOptions {
   candidateMode?: AgentCandidateMode;
   refineAny?: boolean;
   signatureOnly?: boolean;
+  agentBatchSize?: number;
   provider?: string;
   model?: string;
   baseUrl?: string;
@@ -62,6 +63,7 @@ export function migrateJavaScriptProject(options: MigrateJavaScriptOptions): Mig
       candidateMode: options.candidateMode,
       refineAny: options.refineAny,
       signatureOnly: options.signatureOnly,
+      agentBatchSize: options.agentBatchSize,
       provider: options.provider,
       model: options.model,
       baseUrl: options.baseUrl,
@@ -99,6 +101,7 @@ export function migrateTypeScriptProject(options: MigrateTypeScriptOptions): Typ
       candidateMode: options.candidateMode,
       refineAny: options.refineAny,
       signatureOnly: options.signatureOnly,
+      agentBatchSize: options.agentBatchSize,
       provider: options.provider,
       model: options.model,
       baseUrl: options.baseUrl,

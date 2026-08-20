@@ -171,7 +171,10 @@ export class Solver {
             )) {
                 addSpot(functionId, "return");
             } else if (functionType?.kind === "function"
-                && refineAny && functionType.returnType === tNode.BOOLEAN) {
+                && refineAny && functionType.returnType === tNode.BOOLEAN
+                && /^(?:is|has|can|should|assert)[A-Z_$]/.test(
+                    meta.funcName.get(functionId) ?? meta.funcName.get(declarationId) ?? "",
+                )) {
                 // Boolean guards are often erased type predicates (e.g.
                 // `value is Stream`); ask the Agent to refine only this slot.
                 addSpot(functionId, "return", true);

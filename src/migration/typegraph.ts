@@ -52,6 +52,13 @@ export function validType(typeText: string): boolean {
 function namedType(value: string): string {
   if (value === "undefined") return "undefined";
   if (value === "unknown") return "unknown";
+  // Promise nesting is an inference artifact: an async function returning a
+  // Promise should expose one Promise layer in its declaration.
+  let flattened = value;
+  while (/^Promise<Promise<([\s\S]+)>>$/.test(flattened)) {
+    flattened = flattened.replace(/^Promise<Promise<([\s\S]+)>>$/, "Promise<$1>");
+  }
+  if (flattened !== value) return namedType(flattened);
   if (value === "PromiseConstructor") return "Promise<any>";
   if (!value || /^obj_\d+$/.test(value) || /^new\s*(?:\(|\s)/.test(value)
     || /\)\s*:\s+\w/.test(value) || !validType(value)) return "any";
