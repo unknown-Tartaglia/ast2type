@@ -176,6 +176,13 @@ class GroundTruthTypeParserTests(unittest.TestCase):
 
         quoted_union = self.annotation_types["quotedUnion"]
         self.assertEqual(quoted_union["kind"], "union")
+        self.assertEqual(
+            quoted_union["types"],
+            [
+                {"kind": "literal", "value": "a|b"},
+                {"kind": "primitive", "name": "string"},
+            ],
+        )
         self.assertIn({"kind": "literal", "value": "a|b"}, quoted_union["types"])
         self.assertIn({"kind": "primitive", "name": "string"}, quoted_union["types"])
 
@@ -274,4 +281,36 @@ class GroundTruthTypeParserTests(unittest.TestCase):
         self.assertEqual(
             json.loads(feedback_node["fullType"]),
             self.source_types["unsupportedUnion"],
+        )
+
+    def test_agent_feedback_preserves_legal_opaque_generic_types(self):
+        root = Path(self.temporary.name)
+        feedback = root / "generic-feedback.json"
+        feedback.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": self.source_ids["unsupportedGeneric"],
+                        "type": "Promise<string>",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        completed = self._run_inference(
+            ["--agent-feedback", str(feedback)],
+            root / "generic-feedback-output",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        graph = json.loads(
+            (root / "generic-feedback-output" / "typegraph.json").read_text(encoding="utf-8")
+        )
+        node = next(
+            item for item in graph["nodes"] if item["id"] == self.source_ids["unsupportedGeneric"]
+        )
+        inferred = json.loads(node["fullType"])
+        self.assertEqual(inferred["kind"], "union")
+        self.assertIn(
+            {"kind": "object", "name": "Promise<string>", "properties": {}},
+            inferred["types"],
         )

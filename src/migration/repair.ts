@@ -231,7 +231,18 @@ const REPAIR_SCHEMA: Record<string, unknown> = {
         additionalProperties: false,
       },
     },
-    skip: { type: "array", items: { type: "object" } },
+    skip: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          file: { type: "string" },
+          reason: { type: "string" },
+        },
+        required: ["file", "reason"],
+        additionalProperties: false,
+      },
+    },
   },
   required: ["edits", "skip"],
   additionalProperties: false,

@@ -13,6 +13,8 @@ export interface InferenceOptions {
   jsOnly?: boolean;
   mode?: InferenceMode;
   candidateMode?: AgentCandidateMode;
+  refineAny?: boolean;
+  signatureOnly?: boolean;
   provider?: string;
   model?: string;
   baseUrl?: string;
@@ -57,6 +59,8 @@ export function inferProject(options: InferenceOptions): InferenceResult {
   const args = ["-i", path.join(output, "ast"), "-o", output, "--sourcedir", source];
   if (mode === "agent") {
     args.push("--agent", "--agent-candidate-mode", options.candidateMode ?? "fair");
+    if (options.refineAny) args.push("--agent-refine-any");
+    if (options.signatureOnly) args.push("--agent-signature-only");
     if (options.provider) args.push("--agent-provider", options.provider);
     if (options.model) args.push("--agent-model", options.model);
     if (options.baseUrl) args.push("--agent-base-url", options.baseUrl);

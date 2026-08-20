@@ -83,7 +83,7 @@ export function renderType(value: unknown): string {
     }
     case "union": {
       const parts = Array.isArray(type.types)
-        ? type.types.map(renderType).filter(part => part !== "undefined")
+        ? type.types.map(renderType)
         : [];
       return parts.length ? [...new Set(parts)].join(" | ") : "undefined";
     }

@@ -15,6 +15,8 @@ export class tNodeStore {
     UNDEFINED = 5;
     VOID = 6;
     private _synthObjId = 100000;
+    /** Agent 反馈可以保留内部图无法建模但语法合法的泛型文本；GT 仍保持保守解析。 */
+    private allowOpaqueGenerics = false;
 
     constructor() {
         // 预定义一些基础类型
@@ -191,7 +193,8 @@ export class tNodeStore {
                 ret = `function${t.id}:${Object.entries(t.param).sort().map(([idx, {id, type}]) => `${idx}:${id}:${type}`).join(",")}->${t.returnType}`;
                 break;
             case "union":
-                ret = `union:${t.types.sort().join("|")}`;
+                // 仅用排序副本生成哈希；不能改变类型节点的展示顺序。
+                ret = `union:${[...t.types].sort().join("|")}`;
                 break;
             case "object":
                 ret = `object:{${t.id}:${Object.entries(t.properties).sort().map(([k, v]) => `${k}:${v}`).join(",")}}`;
@@ -386,7 +389,7 @@ export class tNodeStore {
     }
 
     /** 将 ground truth/feedback 类型转换为内部类型；无法完整表达时返回 UNKNOWN。 */
-    parseTypeString(raw: string): TypeId | null {
+    parseTypeString(raw: string, options: { allowOpaqueGenerics?: boolean } = {}): TypeId | null {
         // TypeScript 没有独立解析 TypeNode 的公开入口，放进返回类型可复用完整类型语法。
         // 同时要求文件中只有这一条声明，避免 raw 用分号追加其他语句后仍被部分接受。
         const sourceFile = ts.createSourceFile(
@@ -407,7 +410,13 @@ export class tNodeStore {
             return this.UNKNOWN;
         }
 
-        return this._fromTypeScriptType(statements[0].type) ?? this.UNKNOWN;
+        const previous = this.allowOpaqueGenerics;
+        this.allowOpaqueGenerics = options.allowOpaqueGenerics === true;
+        try {
+            return this._fromTypeScriptType(statements[0].type) ?? this.UNKNOWN;
+        } finally {
+            this.allowOpaqueGenerics = previous;
+        }
     }
 
     /** null 表示内部模型无法无损表达；真正的 TypeScript unknown 返回 UNKNOWN TypeId。 */
@@ -565,7 +574,13 @@ export class tNodeStore {
                     ? null
                     : this.newTypeNode({ kind: "array", elementType });
             }
-            if (typeArguments.length > 0) return null;
+            if (typeArguments.length > 0) {
+                if (!this.allowOpaqueGenerics) return null;
+                // 保留合法的泛型文本，避免 Agent 给出的 Record/Map/Promise 等类型被丢弃。
+                return this.newTypeNode({
+                    kind: "object", name: node.getText(), id: ++this._synthObjId, properties: {},
+                });
+            }
             return this.newTypeNode({
                 kind: "object", name, id: ++this._synthObjId, properties: {},
             });

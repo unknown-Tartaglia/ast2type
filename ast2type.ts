@@ -27,6 +27,8 @@ program
   .option("-g, --groundtruth <path>", "Path to ground truth JSON for annotation injection")
   .option("-f, --feedback <path>", "Path to feedback JSON for type injection (LLM-inferred types)")
   .option("--agent", "Enable LLM agent to infer unknown declaration types in-loop")
+  .option("--agent-refine-any", "Also ask Agent to refine any parameter and return slots")
+  .option("--agent-signature-only", "Only ask Agent about function parameters and returns")
   .option("--agent-feedback <path>", "Replay cached Agent feedback at the in-loop injection stage")
   .option("--agent-candidate-mode <mode>", "Agent candidates: fair (GT-independent declarations) or gt (legacy graph candidates)", "fair")
   .option("--agent-provider <provider>", "Agent API provider: deepseek (default) or openai")
@@ -43,6 +45,8 @@ const outputDir = options.output ? path.resolve(options.output) : path.resolve("
 const groundtruthOption: string | undefined = options.groundtruth ? path.resolve(options.groundtruth) : undefined;
 const feedbackOption: string | undefined = options.feedback ? path.resolve(options.feedback) : undefined;
 const agentMode: boolean = !!options.agent;
+const agentRefineAny: boolean = !!options.agentRefineAny;
+const agentSignatureOnly: boolean = !!options.agentSignatureOnly;
 const agentFeedbackOption: string | undefined = options.agentFeedback ? path.resolve(options.agentFeedback) : undefined;
 const agentCandidateModeRaw: string = options.agentCandidateMode;
 if (agentCandidateModeRaw !== "fair" && agentCandidateModeRaw !== "gt") {
@@ -1709,7 +1713,7 @@ function injectFeedback(feedback: FeedbackEntry[]) {
       missedCount++;
       continue;
     }
-    const typeId = tNode.parseTypeString(entry.type);
+    const typeId = tNode.parseTypeString(entry.type, { allowOpaqueGenerics: true });
     if (typeId === null || typeId === tNode.UNKNOWN) {
       console.error(`Feedback: type "${entry.type}" is unknown or unsupported for id ${entry.id}`);
       missedCount++;
@@ -1789,10 +1793,12 @@ async function main() {
       if (!agentConfig) {
         throw new Error("Agent configuration is unavailable");
       }
-      const unkSpots = solver.getUnkInfo(agentCandidateMode);
+      const unkSpots = solver.getUnkInfo(agentCandidateMode, agentRefineAny, agentSignatureOnly);
       const candidateOut = path.join(outputDir, "agent-candidates.json");
       writeJsonStream(candidateOut, {
         mode: agentCandidateMode,
+        refineAny: agentRefineAny,
+        signatureOnly: agentSignatureOnly,
         candidates: unkSpots,
       });
       console.log(`[agent] 候选模式: ${agentCandidateMode}`);

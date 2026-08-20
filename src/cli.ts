@@ -55,6 +55,8 @@ program.command("migrate-js")
   .requiredOption("--work-dir <directory>", "isolated inference artifacts")
   .option("--mode <mode>", "std or agent", "std")
   .option("--candidate-mode <mode>", "fair or gt", "fair")
+  .option("--agent-refine-any", "also refine any parameter and return slots")
+  .option("--agent-signature-only", "only ask Agent about function parameters and returns")
   .option("--agent-provider <provider>")
   .option("--agent-model <model>")
   .option("--agent-base-url <url>")
@@ -72,6 +74,8 @@ program.command("migrate-js")
       workDirectory: options.workDir,
       mode: options.mode,
       candidateMode: options.candidateMode,
+      refineAny: Boolean(options.agentRefineAny),
+      signatureOnly: Boolean(options.agentSignatureOnly),
       provider: options.agentProvider,
       model: options.agentModel,
       baseUrl: options.agentBaseUrl,
@@ -91,6 +95,8 @@ program.command("migrate-ts")
   .requiredOption("--work-dir <directory>", "isolated erase and inference artifacts")
   .option("--mode <mode>", "std or agent", "std")
   .option("--candidate-mode <mode>", "fair or gt", "fair")
+  .option("--agent-refine-any", "also refine any parameter and return slots")
+  .option("--agent-signature-only", "only ask Agent about function parameters and returns")
   .option("--agent-provider <provider>")
   .option("--agent-model <model>")
   .option("--agent-base-url <url>")
@@ -108,6 +114,8 @@ program.command("migrate-ts")
       workDirectory: options.workDir,
       mode: options.mode,
       candidateMode: options.candidateMode,
+      refineAny: Boolean(options.agentRefineAny),
+      signatureOnly: Boolean(options.agentSignatureOnly),
       provider: options.agentProvider,
       model: options.agentModel,
       baseUrl: options.agentBaseUrl,

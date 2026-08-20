@@ -45,7 +45,7 @@ function buildPrompt(
     .map(
       (s) => {
         const loc = s.pos ? `line ${s.pos.line}, col ${s.pos.column}` : `offset ${s.location}`;
-        return `- id=${s.id}, slot=${s.slot}, ${loc}, context="${s.context}", expr="${s.exprText}", exprKind="${s.exprKind}", morphKind="${s.morphKind}"`;
+        return `- id=${s.id}, slot=${s.slot}, currentType=${s.type}, ${loc}, context="${s.context}", expr="${s.exprText}", exprKind="${s.exprKind}", morphKind="${s.morphKind}"`;
       }
     )
     .join("\n");
@@ -77,6 +77,7 @@ ${outputExample}
 你可以使用 TypeScript 完整类型系统，包括但不限于：基础类型、数组、元组、联合/交叉类型、函数签名、泛型、字面量类型、条件类型、映射类型等。
 
 规则：
+- currentType=any 表示基础求解器的保守结果；只有有充分证据时才将它改成具体类型，不能原样返回 any
 - 尽可能精确推断，避免使用 any/object/unknown 除非确实无法推断
 - slot=value 时输出该声明本身的类型；slot=return 时只输出函数返回类型，不要输出完整函数签名
 - 必须原样返回每个节点的 id 和 slot
@@ -160,6 +161,7 @@ async function processBatch(
           id: spot.id,
           slot: spot.slot,
           type: entry.type.trim(),
+          ...(spot.type === "any" ? { refine: true } : {}),
         });
       } else {
         console.warn(`[agent] 跳过非法类型 "${entry.type}" for id=${entry.id}`);

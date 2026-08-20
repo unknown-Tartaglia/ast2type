@@ -5,6 +5,7 @@ import { Fact, FactStore, TypeId, VarId } from "./fact"
 import { TypeGraph } from "./graph"
 import { Rule, RuleStore } from "./rule";
 import { Strategy } from "./strategy"
+import type { NodeState } from "./nType";
 import { writeJsonStream } from "../code2ast";
 
 export interface UnkSpot {
@@ -16,7 +17,8 @@ export interface UnkSpot {
   morphKind: string;
   location: number;
   pos: { line: number; column: number } | null;
-  type: "unknown";
+  /** 当前求解器结果；refine-any 模式也会把 any 交给 Agent 复核。 */
+  type: "unknown" | "any";
   relapath: string;
   file: string;
 }
@@ -28,6 +30,8 @@ export interface AgentFeedbackEntry {
   id: number;
   type: string;
   slot?: AgentCandidateSlot;
+  /** true 表示该反馈用于替换求解器的 opaque/any 结果，而不是合并约束。 */
+  refine?: boolean;
 }
 
 const VALUE_DECLARATION_KINDS = new Set([
@@ -51,6 +55,29 @@ export class Solver {
 
     constructor(private rule: RuleStore, private strategy: Strategy) { }
 
+    /**
+     * 判断一个图类型是否会在 TypeScript 写回时退化成 any。
+     * 空对象和未知元素数组虽然不是 ANY TypeId，但对迁移结果没有可用信息。
+     */
+    private isOpaqueType(typeId: number): boolean {
+        const type = tNode.get(typeId);
+        if (!type) return true;
+        if (type.kind === "primitive") {
+            return type.name === "any" || type.name === "unknown";
+        }
+        if (type.kind === "object") {
+            return !type.name || type.name === "object" || /^obj_\d+$/.test(type.name);
+        }
+        if (type.kind === "array") {
+            return this.isOpaqueType(type.elementType);
+        }
+        if (type.kind === "function") {
+            return this.isOpaqueType(type.returnType)
+                || Object.values(type.param).some(param => this.isOpaqueType(param.type));
+        }
+        return false;
+    }
+
     private buildUnkSpot(id: VarId, slot: AgentCandidateSlot): UnkSpot {
         const astFile = meta.file.get(id);
         const marker = `ast${path.sep}`;
@@ -66,6 +93,17 @@ export class Solver {
             file = path.join(sourceDir, relapath);
         }
 
+        let currentType: UnkSpot["type"] = "unknown";
+        const state = this.graph.nodes.get(id);
+        if (slot === "value" && state && this.isOpaqueType(state.val)) {
+            currentType = "any";
+        } else if (slot === "return") {
+            const functionType = state ? tNode.get(state.val) : undefined;
+            if (functionType?.kind === "function" && this.isOpaqueType(functionType.returnType)) {
+                currentType = "any";
+            }
+        }
+
         return {
             id,
             slot,
@@ -75,7 +113,7 @@ export class Solver {
             morphKind: meta.kind.get(id) || "",
             location: meta.offset.get(id) ?? -1,
             pos: meta.pos.get(id) || null,
-            type: "unknown",
+            type: currentType,
             relapath,
             file,
         };
@@ -87,7 +125,7 @@ export class Solver {
      * fair: 从源码声明元数据枚举，不读取 annotation 边，因此候选不受 GT 影响。
      * gt: 保留历史图边算法，注入 GT 后新增的 annotation 边可以产生候选。
      */
-    getUnkInfo(mode: AgentCandidateMode = "fair"): UnkSpot[] {
+    getUnkInfo(mode: AgentCandidateMode = "fair", refineAny = false, signatureOnly = false): UnkSpot[] {
         const spots: UnkSpot[] = [];
         if (mode === "gt") {
             for (const [id] of this.graph.toEdges) {
@@ -107,9 +145,12 @@ export class Solver {
         };
 
         for (const [declarationId, kind] of meta.declKind) {
+            if (signatureOnly && kind !== "Parameter" && !FUNCTION_DECLARATION_KINDS.has(kind)) {
+                continue;
+            }
             if (VALUE_DECLARATION_KINDS.has(kind)) {
                 const state = this.graph.nodes.get(declarationId);
-                if (!state || state.val === tNode.UNKNOWN) {
+                if (!state || state.val === tNode.UNKNOWN || (refineAny && kind === "Parameter" && this.isOpaqueType(state.val))) {
                     addSpot(declarationId, "value");
                 }
                 continue;
@@ -121,7 +162,10 @@ export class Solver {
             const state = this.graph.nodes.get(functionId) ?? this.graph.nodes.get(declarationId);
             if (!state) continue;
             const functionType = tNode.get(state.val);
-            if (functionType?.kind === "function" && functionType.returnType === tNode.UNKNOWN) {
+            if (functionType?.kind === "function" && (
+                functionType.returnType === tNode.UNKNOWN
+                || (refineAny && this.isOpaqueType(functionType.returnType))
+            )) {
                 addSpot(functionId, "return");
             }
         }
@@ -131,9 +175,46 @@ export class Solver {
 
     /** 将 LLM 推断的类型注入为 Fact 并继续求解（增量，不清空已求结果） */
     injectFeedback(feedback: AgentFeedbackEntry[]) {
-        const newFacts: Fact[] = injectFeedback(feedback);
+        const replaceable = new Map<VarId, NodeState>();
+        const ordinaryFeedback: AgentFeedbackEntry[] = [];
+        for (const entry of feedback) {
+            if (!entry.refine) {
+                ordinaryFeedback.push(entry);
+                continue;
+            }
+            const typeId = tNode.parseTypeString(entry.type);
+            if (typeId === null || typeId === tNode.UNKNOWN) {
+                ordinaryFeedback.push(entry);
+                continue;
+            }
+            const state = this.graph.nodes.get(entry.id);
+            if (!state) {
+                ordinaryFeedback.push(entry);
+                continue;
+            }
+            if ((entry.slot ?? "value") === "value" && this.isOpaqueType(state.val)) {
+                replaceable.set(entry.id, this.strategy.newNodeState(typeId));
+                continue;
+            }
+            if ((entry.slot ?? "value") === "return") {
+                const functionType = tNode.get(state.val);
+                if (functionType?.kind === "function" && this.isOpaqueType(functionType.returnType)) {
+                    const replacement = tNode.newTypeNode({ ...functionType, returnType: typeId });
+                    replaceable.set(entry.id, this.strategy.newNodeState(replacement));
+                    continue;
+                }
+            }
+            ordinaryFeedback.push(entry);
+        }
 
-        if (newFacts.length === 0) return;
+        const newFacts: Fact[] = injectFeedback(ordinaryFeedback);
+
+        for (const [node, state] of replaceable) {
+            this.graph.setType(node, state);
+            this.worklist.push(node);
+        }
+
+        if (newFacts.length === 0 && replaceable.size === 0) return;
 
         // 对新 fact 跑规则 → 增量注入图
         const effects = this.rule.applyRules(newFacts);

@@ -15,6 +15,8 @@ export interface MigrateJavaScriptOptions {
   workDirectory: string;
   mode?: InferenceMode;
   candidateMode?: AgentCandidateMode;
+  refineAny?: boolean;
+  signatureOnly?: boolean;
   provider?: string;
   model?: string;
   baseUrl?: string;
@@ -58,6 +60,8 @@ export function migrateJavaScriptProject(options: MigrateJavaScriptOptions): Mig
       output: workDirectory,
       mode,
       candidateMode: options.candidateMode,
+      refineAny: options.refineAny,
+      signatureOnly: options.signatureOnly,
       provider: options.provider,
       model: options.model,
       baseUrl: options.baseUrl,
@@ -93,6 +97,8 @@ export function migrateTypeScriptProject(options: MigrateTypeScriptOptions): Typ
       output: inference,
       mode,
       candidateMode: options.candidateMode,
+      refineAny: options.refineAny,
+      signatureOnly: options.signatureOnly,
       provider: options.provider,
       model: options.model,
       baseUrl: options.baseUrl,

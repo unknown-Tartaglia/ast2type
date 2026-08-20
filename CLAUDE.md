@@ -85,6 +85,8 @@ npm run migration -- repair <typescript-project> --out <fixed-copy> --strategy r
 - `agent` 将 LLM 候选反馈到图中，再继续求解。
 - `fair` 候选与 ground truth 无关，是正式对比的默认模式。
 - `gt` 保留历史候选行为，只用于复现实验，结果必须明确标注。
+- `--agent-signature-only` 只收集参数和函数返回槽，适合签名 Accuracy 实验。
+- `--agent-refine-any` 额外复核会在写回时退化为 `any` 的不透明签名槽；它不读取 ground truth。
 - 不支持或无法解析的 ground-truth 类型视为 `unknown`，不得注入图。
 
 OpenAI 使用 `OPENAI_API_KEY`，DeepSeek 使用 `DEEPSEEK_API_KEY`。provider、model 和

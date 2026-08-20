@@ -240,6 +240,7 @@ class MigrationCoreTests(unittest.TestCase):
                   report: woven.report,
                   object: renderType({ kind: 'object', properties: { name: { kind: 'primitive', name: 'string' } } }),
                   array: renderType({ kind: 'array', elementType: { kind: 'union', types: ['string', 'number'] } }),
+                  optional: renderType({ kind: 'union', types: ['string', 'undefined'] }),
                 }));
                 """,
                 {"TEST_ROOT": str(root)},
@@ -252,6 +253,7 @@ class MigrationCoreTests(unittest.TestCase):
             self.assertEqual(result["report"]["ignoredNoncanonical"], 1)
             self.assertEqual(result["object"], "{ name: string }")
             self.assertEqual(result["array"], "(string | number)[]")
+            self.assertEqual(result["optional"], "string | undefined")
 
     def test_javascript_migration_normalizes_compatibility_constructs(self):
         with tempfile.TemporaryDirectory() as temporary:
