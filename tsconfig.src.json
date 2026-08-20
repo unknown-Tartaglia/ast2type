@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "target": "es2021",
+    "skipLibCheck": true
+  },
+  "include": [
+    "src/**/*.ts",
+    "agent/net.ts"
+  ]
+}

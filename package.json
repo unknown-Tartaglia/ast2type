@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "test": "npm run test:regression",
-    "test:regression": "python3 -m unittest discover -v -s tests/regression -p 'test_*.py'"
+    "test:regression": "python3 -m unittest discover -v -s tests/regression -p 'test_*.py'",
+    "typecheck": "tsc -p tsconfig.src.json --noEmit",
+    "migration": "node -r ts-node/register src/cli.ts"
   },
   "keywords": [],
   "author": "",

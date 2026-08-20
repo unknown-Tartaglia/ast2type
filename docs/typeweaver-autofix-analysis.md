@@ -182,9 +182,11 @@ TypeScript 版本，因此与当前 5.9.3 统一复检分表报告。
 - 当前 AST 四种方案：`TypeWeaver/data/Pipeline-out/top1k-typed-nodeps-es6-ast-matrix-v2/`
 - 公开基线统一复检：`TypeWeaver/data/compile-comparison/top1k-typed-nodeps-es6-unified-ts59-v1/`
 - 当前比较结果：`TypeWeaver/data/compile-comparison/top1k-typed-nodeps-es6-final-ts59-v1/comparison.json`
-- 统一编译器：`ast2type/generate/tsc_check.py`
-- AST TS 生成：`ast2type/generate/pipeline_ts.py`
-- Auto-fix：`ast2type/generate/auto_fix.py`、`ast2type/generate/locate_auto_fix.js`
+- 当前统一入口：`ast2type/src/cli.ts`
+- 统一编译器：`ast2type/src/migration/compiler.ts`
+- AST TS 生成：`ast2type/src/migration/js.ts`
+- Auto-fix：`ast2type/src/migration/repair.ts`
+- 当前批量实验：`TypeWeaver/experiments/ast2type/run.py`
 - TypeWeaver 公开基线织入：`TypeWeaver/src/migrate_dataset/type_weaving.py`
 - TypeWeaver 历史编译结果：`TypeWeaver/data/notes/csv/typecheck.*.csv`
 - LambdaNet 历史检查产物：`TypeWeaver/data/LambdaNet-out/top1k-typed-nodeps-es6/baseline-checked/`
