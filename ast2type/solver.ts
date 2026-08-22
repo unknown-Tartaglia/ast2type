@@ -61,7 +61,13 @@ export class Solver {
      * 判断一个图类型是否会在 TypeScript 写回时退化成 any。
      * 空对象和未知元素数组虽然不是 ANY TypeId，但对迁移结果没有可用信息。
      */
-    private isOpaqueType(typeId: number): boolean {
+    private isOpaqueType(typeId: number, visiting = new Set<number>()): boolean {
+        // Recursive function/array types are common in utility libraries.  Stop
+        // following a type graph cycle; the first occurrence already classified
+        // the concrete node, so revisiting it cannot make the type more opaque.
+        if (visiting.has(typeId)) return false;
+        const path = new Set(visiting);
+        path.add(typeId);
         const type = tNode.get(typeId);
         if (!type) return true;
         if (type.kind === "primitive") {
@@ -71,11 +77,11 @@ export class Solver {
             return !type.name || type.name === "object" || /^obj_\d+$/.test(type.name);
         }
         if (type.kind === "array") {
-            return this.isOpaqueType(type.elementType);
+            return this.isOpaqueType(type.elementType, path);
         }
         if (type.kind === "function") {
-            return this.isOpaqueType(type.returnType)
-                || Object.values(type.param).some(param => this.isOpaqueType(param.type));
+            return this.isOpaqueType(type.returnType, path)
+                || Object.values(type.param).some(param => this.isOpaqueType(param.type, path));
         }
         return false;
     }

@@ -342,3 +342,51 @@ export async function inferTypes(
 
   return results;
 }
+
+/**
+ * Run independent Agent passes and keep only exact agreements.  This is a
+ * precision-oriented mode for benchmark runs: an unstable answer is omitted
+ * instead of silently choosing one of two incompatible signatures.
+ */
+export async function inferTypesConsensus(
+  unkSpots: UnkSpot[],
+  config: AgentConfig,
+  rounds = 1,
+  batchSize = 30,
+  onProgress?: (file: string, done: number, total: number) => void,
+  concurrency = 20,
+  inferOutputPath?: string,
+): Promise<AgentFeedbackEntry[]> {
+  if (!Number.isInteger(rounds) || rounds <= 0) {
+    throw new Error(`Invalid Agent consensus rounds ${rounds}; expected a positive integer`);
+  }
+  if (rounds === 1) {
+    return inferTypes(unkSpots, config, batchSize, onProgress, concurrency, inferOutputPath);
+  }
+
+  const passes: AgentFeedbackEntry[][] = [];
+  for (let round = 0; round < rounds; round++) {
+    console.log(`[agent] 共识轮次 ${round + 1}/${rounds}`);
+    passes.push(await inferTypes(unkSpots, config, batchSize, onProgress, concurrency));
+  }
+  const byKey = new Map<string, AgentFeedbackEntry[]>();
+  for (const entry of passes[0]) {
+    byKey.set(`${entry.id}:${entry.slot}`, [entry]);
+  }
+  for (let round = 1; round < passes.length; round++) {
+    const current = new Map<string, AgentFeedbackEntry>(
+      passes[round].map(entry => [`${entry.id}:${entry.slot}`, entry] as const),
+    );
+    for (const [key, entries] of byKey) {
+      const entry = current.get(key);
+      if (entry) entries.push(entry);
+      else byKey.delete(key);
+    }
+  }
+  const agreed = [...byKey.values()]
+    .filter(entries => entries.every(entry => entry.type === entries[0].type))
+    .map(entries => entries[0]);
+  if (inferOutputPath) writeInferenceCheckpoint(inferOutputPath, agreed);
+  console.log(`[agent] 共识保留 ${agreed.length}/${unkSpots.length} 条`);
+  return agreed;
+}

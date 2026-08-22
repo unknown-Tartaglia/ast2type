@@ -257,6 +257,128 @@ class MigrationCoreTests(unittest.TestCase):
             self.assertEqual(result["optional"], "string | undefined")
             self.assertEqual(result["optionalParam"], "(value: string) => void")
 
+    def test_weaver_preserves_string_return_literals_and_widens_defaults(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "index.js"
+            source.write_text(
+                "function detect(value) {\n"
+                "  if (!value) return;\n"
+                "  return value ? '\\r\\n' : '\\n';\n"
+                "}\n"
+                "function graceful(value) { return (typeof value === 'string' && detect(value)) || '\\n'; }\n"
+                "function parse(source, name = '@') { return source + name; }\n",
+                encoding="utf-8",
+            )
+            result = self.run_node(
+                """
+                const fs = require('fs');
+                const ts = require('typescript');
+                const { weaveJavaScript } = require('./src/migration/js');
+                const root = process.env.TEST_ROOT;
+                const file = require('path').join(root, 'index.js');
+                const text = fs.readFileSync(file, 'utf8');
+                const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+                const functions = [];
+                const visit = node => {
+                  if (ts.isFunctionDeclaration(node)) functions.push(node);
+                  ts.forEachChild(node, visit);
+                };
+                visit(source);
+                const position = node => {
+                  const value = source.getLineAndCharacterOfPosition(node.getStart(source));
+                  return { start: { line: value.line + 1, character: value.character + 1 } };
+                };
+                const graph = { nodes: [
+                  { id: 1, file, position: position(functions[0]), fullType: JSON.stringify({
+                    id: 1, kind: 'function', name: 'detect',
+                    params: [{ name: 'value', type: 'string' }], returnType: 'void | string',
+                  }) },
+                  { id: 2, file, position: position(functions[1]), fullType: JSON.stringify({
+                    id: 2, kind: 'function', name: 'graceful',
+                    params: [{ name: 'value', type: 'string' }], returnType: 'boolean | void | string',
+                  }) },
+                  { id: 3, file, position: position(functions[2]), fullType: JSON.stringify({
+                    id: 3, kind: 'function', name: 'parse',
+                    params: [{ name: 'source', type: 'string' }, { name: 'name', type: "'@'" }], returnType: 'string',
+                  }) },
+                ] };
+                const woven = weaveJavaScript(root, graph);
+                console.log(JSON.stringify(woven.files.get('index.js')));
+                """,
+                {"TEST_ROOT": str(root)},
+            )
+            self.assertIn(": '\\r\\n' | '\\n' | undefined", result)
+            self.assertIn("function graceful(value: string) : '\\r\\n' | '\\n'", result)
+            self.assertIn("name: string = '@'", result)
+
+    def test_weaver_recovers_obvious_buffer_and_generator_predicates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "index.js"
+            source.write_text(
+                "export function isBuffer(value) { return value != null && value.constructor.isBuffer(value); }\n"
+                "export function isGeneratorFunction(value) { return value.constructor.name === 'GeneratorFunction'; }\n",
+                encoding="utf-8",
+            )
+            result = self.run_node(
+                """
+                const fs = require('fs');
+                const ts = require('typescript');
+                const { weaveJavaScript } = require('./src/migration/js');
+                const root = process.env.TEST_ROOT;
+                const file = require('path').join(root, 'index.js');
+                const text = fs.readFileSync(file, 'utf8');
+                const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+                const functions = [];
+                const visit = node => { if (ts.isFunctionDeclaration(node)) functions.push(node); ts.forEachChild(node, visit); };
+                visit(source);
+                const position = node => { const p = source.getLineAndCharacterOfPosition(node.getStart(source)); return { start: { line: p.line + 1, character: p.character + 1 } }; };
+                const graph = { nodes: functions.map((node, id) => ({
+                  id: id + 1, file, position: position(node), fullType: JSON.stringify({
+                    id: id + 1, kind: 'function', name: node.name.text,
+                    params: [{ name: 'value', type: 'unknown' }], returnType: 'boolean',
+                  }),
+                })) };
+                console.log(JSON.stringify(weaveJavaScript(root, graph).files.get('index.js')));
+                """,
+                {"TEST_ROOT": str(root)},
+            )
+            self.assertIn("value is Buffer", result)
+            self.assertIn("value is GeneratorFunction", result)
+
+    def test_qualified_predicate_fallback_merges_with_function_namespace(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "index.js").write_text(
+                "export function isTypedArray(value) { return value instanceof Uint8Array; }\n",
+                encoding="utf-8",
+            )
+            result = self.run_node(
+                """
+                const fs = require('fs');
+                const { weaveJavaScript } = require('./src/migration/js');
+                const root = process.env.TEST_ROOT;
+                const content = weaveJavaScript(root, { nodes: [{
+                  id: 1,
+                  file: require('path').join(root, 'index.js'),
+                  position: { start: { line: 1, character: 1 } },
+                  fullType: JSON.stringify({ id: 1, kind: 'function', name: 'isTypedArray',
+                    params: [{ name: 'value', type: 'unknown' }], returnType: 'boolean' }),
+                }] }).files.get('index.js');
+                fs.writeFileSync(require('path').join(root, 'index.ts'), content);
+                console.log(JSON.stringify(content));
+                """,
+                {"TEST_ROOT": str(root)},
+            )
+            self.assertIn("namespace isTypedArray", result)
+            checked = subprocess.run(
+                ["node", str(ROOT / "node_modules/typescript/bin/tsc"), "--noEmit", "--skipLibCheck", str(root / "index.ts")],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+
     def test_javascript_migration_normalizes_compatibility_constructs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

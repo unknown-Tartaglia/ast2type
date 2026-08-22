@@ -104,6 +104,155 @@ function identifierName(node: ts.Node | undefined): string | undefined {
     : undefined;
 }
 
+function unwrapExpression(expression: ts.Expression): ts.Expression {
+  let current = expression;
+  while (ts.isParenthesizedExpression(current)
+    || ts.isAsExpression(current)
+    || ts.isTypeAssertionExpression(current)
+    || ts.isNonNullExpression(current)) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function widenDefaultLiteralType(
+  type: string,
+  parameter: ts.ParameterDeclaration,
+  source: ts.SourceFile,
+): string {
+  if (!parameter.initializer) return type;
+  const initializer = unwrapExpression(parameter.initializer);
+  const literal = initializer.getText(source);
+  // A default value is a runtime fallback, not a literal-only restriction on
+  // callers.  This also repairs quoted values returned by an LLM such as
+  // `"'@'"`, which otherwise produce an invalid/overly narrow declaration.
+  if (ts.isStringLiteralLike(initializer)
+    && (type === literal || /^(['"]).*\1$/.test(type))) return "string";
+  if ((initializer.kind === ts.SyntaxKind.TrueKeyword || initializer.kind === ts.SyntaxKind.FalseKeyword)
+    && /^(?:true|false)$/.test(type)) return "boolean";
+  if (ts.isNumericLiteral(initializer) && /^-?\d+(?:\.\d+)?$/.test(type)) return "number";
+  return type;
+}
+
+function staticStringReturnType(
+  node: FunctionNode,
+  source: ts.SourceFile,
+  seen = new Set<ts.Node>(),
+): string | undefined {
+  if (seen.has(node)) return undefined;
+  seen.add(node);
+  const values: string[] = [];
+  let unsupported = false;
+
+  const namedFunction = (name: string): FunctionNode | undefined => {
+    let found: FunctionNode | undefined;
+    const visit = (child: ts.Node): void => {
+      if (found) return;
+      if (child !== node && isFunctionNode(child) && functionName(child, source) === name) {
+        found = child;
+        return;
+      }
+      ts.forEachChild(child, visit);
+    };
+    visit(source);
+    return found;
+  };
+
+  const collectExpression = (expression: ts.Expression): void => {
+    const unwrapped = unwrapExpression(expression);
+    if (ts.isStringLiteralLike(unwrapped)) {
+      values.push(unwrapped.getText(source));
+      return;
+    }
+    if (unwrapped.kind === ts.SyntaxKind.NullKeyword) {
+      values.push("null");
+      return;
+    }
+    if (ts.isVoidExpression(unwrapped)
+      && unwrapped.expression.kind === ts.SyntaxKind.NumericLiteral
+      && unwrapped.expression.getText(source) === "0") {
+      values.push("undefined");
+      return;
+    }
+    if (ts.isConditionalExpression(unwrapped)) {
+      collectExpression(unwrapped.whenTrue);
+      collectExpression(unwrapped.whenFalse);
+      return;
+    }
+    if (ts.isBinaryExpression(unwrapped)
+      && (unwrapped.operatorToken.kind === ts.SyntaxKind.BarBarToken
+        || unwrapped.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken)) {
+      const start = values.length;
+      if (unwrapped.operatorToken.kind === ts.SyntaxKind.BarBarToken) {
+        collectExpression(unwrapped.left);
+        // `x || fallback` cannot return the falsy literal/undefined branch of x.
+        values.splice(start, values.length - start,
+          ...values.slice(start).filter(value => !["undefined", "null", "false", "0", "''", '""'].includes(value)));
+        collectExpression(unwrapped.right);
+      } else if (ts.isCallExpression(unwrapped.right)
+        && ts.isIdentifier(unwrapped.right.expression)
+        && namedFunction(unwrapped.right.expression.text)) {
+        // Guard expressions such as `typeof x === 'string' && detect(x)`
+        // return the guarded call's value when the guard succeeds.
+        const previousUnsupported = unsupported;
+        collectExpression(unwrapped.right);
+        if (values.length > start) unsupported = previousUnsupported;
+      }
+      return;
+    }
+    if (ts.isCallExpression(unwrapped) && ts.isIdentifier(unwrapped.expression)) {
+      const callee = namedFunction(unwrapped.expression.text);
+      const nested = callee && staticStringReturnType(callee, source, seen);
+      if (nested) {
+        values.push(...nested.split(" | "));
+        return;
+      }
+    }
+    unsupported = true;
+  };
+
+  const visit = (child: ts.Node): void => {
+    // Nested functions have independent return types.
+    if (child !== node && isFunctionNode(child)) return;
+    if (ts.isReturnStatement(child)) {
+      if (child.expression) collectExpression(child.expression);
+      else values.push("undefined");
+      return;
+    }
+    ts.forEachChild(child, visit);
+  };
+  if (node.body) visit(node.body);
+  if (unsupported || values.length === 0) return undefined;
+
+  const unique = [...new Set(values)];
+  const stringValues = unique.filter(value => value !== "undefined" && value !== "null");
+  // A single literal normally widens to `string` in JavaScript.  Preserve a
+  // literal union only when control flow demonstrates more than one outcome.
+  if (stringValues.length < 2) return undefined;
+  if (unique.includes("null")) return undefined;
+  const ordered = [...stringValues, ...(unique.includes("undefined") ? ["undefined"] : [])];
+  return ordered.join(" | ");
+}
+
+function staticPredicateReturnType(
+  node: FunctionNode,
+  source: ts.SourceFile,
+  returnType: string,
+): string | undefined {
+  if (returnType !== "boolean" || node.parameters.length === 0) return undefined;
+  const name = functionName(node, source);
+  const parameter = node.parameters[0].name;
+  if (!name || !ts.isIdentifier(parameter) || !/^is[A-Z_$]/.test(name)) return undefined;
+  const body = node.body?.getText(source) ?? "";
+  let target: string | undefined;
+  if (name === "isBuffer" && /\.isBuffer\s*\(/.test(body)) target = "Buffer";
+  else if (/GeneratorFunction/.test(body)) target = "GeneratorFunction";
+  else if (name === "isTypedArray") target = "isTypedArray.TypedArray";
+  else if (/^(?:isStrict|isLoose)TypedArray$/.test(name)) target = "TypedArray";
+  if (!target) return undefined;
+  return `${parameter.text} is ${target}`;
+}
+
 function addClassFields(content: string, file: string): string {
   const source = ts.createSourceFile(file, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const edits: Array<Omit<TextEdit, "file">> = [];
@@ -254,9 +403,14 @@ function normalizeCompatibility(content: string, file: string): { content: strin
  */
 function injectPredicateFallbackTypes(content: string): string {
   const names = new Set<string>();
+  const qualified = new Map<string, Set<string>>();
   const declared = new Set<string>();
-  const declarationPattern = /\b(?:type|interface|class|enum|function|const|let|var)\s+([A-Za-z_$][\w$]*)/g;
-  for (const match of content.matchAll(declarationPattern)) declared.add(match[1]);
+  const typeDeclared = new Set<string>();
+  const declarationPattern = /\b(type|interface|class|enum|function|const|let|var)\s+([A-Za-z_$][\w$]*)/g;
+  for (const match of content.matchAll(declarationPattern)) {
+    declared.add(match[2]);
+    if (["type", "interface", "class", "enum"].includes(match[1])) typeDeclared.add(match[2]);
+  }
   const importPattern = /\bimport\s+(?:type\s+)?(?:\{([^}]+)\}|([A-Za-z_$][\w$]*))/g;
   for (const match of content.matchAll(importPattern)) {
     for (const item of (match[1] ?? match[2] ?? "").split(",")) {
@@ -264,12 +418,26 @@ function injectPredicateFallbackTypes(content: string): string {
       if (name) declared.add(name);
     }
   }
-  const predicatePattern = /\b[A-Za-z_$][\w$]*\s+is\s+([A-Za-z_$][\w$]*)\b/g;
+  const predicatePattern = /\b[A-Za-z_$][\w$]*\s+is\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\b/g;
   for (const match of content.matchAll(predicatePattern)) {
-    if (!declared.has(match[1])) names.add(match[1]);
+    const parts = match[1].split(".");
+    if (parts.length === 1) {
+      // Values and types occupy separate TypeScript namespaces.  A generated
+      // `declare var Buffer` therefore still needs a type fallback for
+      // `value is Buffer` when node typings are unavailable.
+      if (!typeDeclared.has(parts[0])) names.add(parts[0]);
+    } else {
+      const members = qualified.get(parts[0]) ?? new Set<string>();
+      members.add(parts.slice(1).join("."));
+      qualified.set(parts[0], members);
+    }
   }
-  if (!names.size) return content;
-  const aliases = [...names].map(name => `type ${name} = any;`).join("\n") + "\n";
+  if (!names.size && !qualified.size) return content;
+  const aliases = [
+    ...[...names].map(name => `type ${name} = any;`),
+    ...[...qualified.entries()].map(([root, members]) =>
+      `namespace ${root} { ${[...members].map(member => `export type ${member} = any;`).join(" ")} }`),
+  ].join("\n") + "\n";
   let position = 0;
   if (content.startsWith("#!")) {
     const newline = content.indexOf("\n");
@@ -290,6 +458,7 @@ function editsForFunction(
   node.parameters.forEach((parameter, index) => {
     if (parameter.type) return;
     let type = target.parameterTypes[index]?.trim() || "any";
+    type = widenDefaultLiteralType(type, parameter, source);
     if (!validType(type)) type = parameter.dotDotDotToken ? "any[]" : "any";
     if (parameter.dotDotDotToken) type = restType(type);
     if (bareArrowParameter(node, parameter, source)) {
@@ -313,6 +482,12 @@ function editsForFunction(
       const assertion = predicate[1] ?? "";
       returnType = `${assertion}${firstParameter.text} is ${predicate[3]}`;
     }
+    const staticReturn = staticStringReturnType(node, source);
+    if (staticReturn && /^(?:(?:any|unknown|boolean|void|string)\s*\|\s*)*(?:any|unknown|boolean|void|string)$/.test(returnType)) {
+      returnType = staticReturn;
+    }
+    const staticPredicate = staticPredicateReturnType(node, source, returnType);
+    if (staticPredicate) returnType = staticPredicate;
     if (!validType(returnType)) returnType = "any";
     const async = node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword);
     if (async && !/^Promise\s*</.test(returnType)) {

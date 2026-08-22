@@ -31,6 +31,8 @@ program
   .option("--agent-refine-any", "Also ask Agent to refine any parameter and return slots")
   .option("--agent-signature-only", "Only ask Agent about function parameters and returns")
   .option("--agent-batch-size <number>", "Agent declarations per request", "30")
+  .option("--agent-consensus-rounds <number>", "Independent Agent passes required for consensus", "1")
+  .option("--agent-concurrency <number>", "Maximum concurrent Agent requests", "20")
   .option("--agent-feedback <path>", "Replay cached Agent feedback at the in-loop injection stage")
   .option("--agent-candidate-mode <mode>", "Agent candidates: fair (GT-independent declarations) or gt (legacy graph candidates)", "fair")
   .option("--agent-provider <provider>", "Agent API provider: deepseek (default) or openai")
@@ -50,6 +52,8 @@ const agentMode: boolean = !!options.agent;
 const agentRefineAny: boolean = !!options.agentRefineAny;
 const agentSignatureOnly: boolean = !!options.agentSignatureOnly;
 const agentBatchSize: number = Number(options.agentBatchSize ?? 30);
+const agentConsensusRounds: number = Number(options.agentConsensusRounds ?? 1);
+const agentConcurrency: number = Number(options.agentConcurrency ?? 20);
 const agentFeedbackOption: string | undefined = options.agentFeedback ? path.resolve(options.agentFeedback) : undefined;
 const agentCandidateModeRaw: string = options.agentCandidateMode;
 if (agentCandidateModeRaw !== "fair" && agentCandidateModeRaw !== "gt") {
@@ -1902,17 +1906,18 @@ async function main() {
           : { ...spot, file: path.join(sourceDir, spot.relapath) });
         console.log(`[agent] 源码目录: ${sourceDir}`);
 
-        const { inferTypes } = await import("./agent/infer");
-        feedback = await inferTypes(
+        const { inferTypesConsensus } = await import("./agent/infer");
+        feedback = await inferTypesConsensus(
           sourceSpots,
           agentConfig,
+          agentConsensusRounds,
           agentBatchSize,
           (file, done, total) => {
             if (done >= total) {
               console.log(`[agent] ${file}: ${done}/${total}`);
             }
           },
-          20,
+          agentConcurrency,
           path.join(outputDir, "inferinfo.json"),
         );
 

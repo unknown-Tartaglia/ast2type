@@ -18,6 +18,8 @@ export interface MigrateJavaScriptOptions {
   refineAny?: boolean;
   signatureOnly?: boolean;
   agentBatchSize?: number;
+  agentConsensusRounds?: number;
+  agentConcurrency?: number;
   provider?: string;
   model?: string;
   baseUrl?: string;
@@ -64,6 +66,8 @@ export function migrateJavaScriptProject(options: MigrateJavaScriptOptions): Mig
       refineAny: options.refineAny,
       signatureOnly: options.signatureOnly,
       agentBatchSize: options.agentBatchSize,
+      agentConsensusRounds: options.agentConsensusRounds,
+      agentConcurrency: options.agentConcurrency,
       provider: options.provider,
       model: options.model,
       baseUrl: options.baseUrl,
@@ -102,6 +106,8 @@ export function migrateTypeScriptProject(options: MigrateTypeScriptOptions): Typ
       refineAny: options.refineAny,
       signatureOnly: options.signatureOnly,
       agentBatchSize: options.agentBatchSize,
+      agentConsensusRounds: options.agentConsensusRounds,
+      agentConcurrency: options.agentConcurrency,
       provider: options.provider,
       model: options.model,
       baseUrl: options.baseUrl,

@@ -16,6 +16,8 @@ export interface InferenceOptions {
   refineAny?: boolean;
   signatureOnly?: boolean;
   agentBatchSize?: number;
+  agentConsensusRounds?: number;
+  agentConcurrency?: number;
   provider?: string;
   model?: string;
   baseUrl?: string;
@@ -63,6 +65,8 @@ export function inferProject(options: InferenceOptions): InferenceResult {
     if (options.refineAny) args.push("--agent-refine-any");
     if (options.signatureOnly) args.push("--agent-signature-only");
     if (options.agentBatchSize !== undefined) args.push("--agent-batch-size", String(options.agentBatchSize));
+    if (options.agentConsensusRounds !== undefined) args.push("--agent-consensus-rounds", String(options.agentConsensusRounds));
+    if (options.agentConcurrency !== undefined) args.push("--agent-concurrency", String(options.agentConcurrency));
     if (options.provider) args.push("--agent-provider", options.provider);
     if (options.model) args.push("--agent-model", options.model);
     if (options.baseUrl) args.push("--agent-base-url", options.baseUrl);

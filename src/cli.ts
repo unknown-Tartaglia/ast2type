@@ -58,6 +58,8 @@ program.command("migrate-js")
   .option("--agent-refine-any", "also refine any parameter and return slots")
   .option("--agent-signature-only", "only ask Agent about function parameters and returns")
   .option("--agent-batch-size <number>", "Agent declarations per request", "30")
+  .option("--agent-consensus-rounds <number>", "Independent Agent passes required for consensus", "1")
+  .option("--agent-concurrency <number>", "Maximum concurrent Agent requests", "20")
   .option("--agent-provider <provider>")
   .option("--agent-model <model>")
   .option("--agent-base-url <url>")
@@ -78,6 +80,8 @@ program.command("migrate-js")
       refineAny: Boolean(options.agentRefineAny),
       signatureOnly: Boolean(options.agentSignatureOnly),
       agentBatchSize: Number(options.agentBatchSize),
+      agentConsensusRounds: Number(options.agentConsensusRounds),
+      agentConcurrency: Number(options.agentConcurrency),
       provider: options.agentProvider,
       model: options.agentModel,
       baseUrl: options.agentBaseUrl,
@@ -100,6 +104,8 @@ program.command("migrate-ts")
   .option("--agent-refine-any", "also refine any parameter and return slots")
   .option("--agent-signature-only", "only ask Agent about function parameters and returns")
   .option("--agent-batch-size <number>", "Agent declarations per request", "30")
+  .option("--agent-consensus-rounds <number>", "Independent Agent passes required for consensus", "1")
+  .option("--agent-concurrency <number>", "Maximum concurrent Agent requests", "20")
   .option("--agent-provider <provider>")
   .option("--agent-model <model>")
   .option("--agent-base-url <url>")
@@ -120,6 +126,8 @@ program.command("migrate-ts")
       refineAny: Boolean(options.agentRefineAny),
       signatureOnly: Boolean(options.agentSignatureOnly),
       agentBatchSize: Number(options.agentBatchSize),
+      agentConsensusRounds: Number(options.agentConsensusRounds),
+      agentConcurrency: Number(options.agentConcurrency),
       provider: options.agentProvider,
       model: options.agentModel,
       baseUrl: options.agentBaseUrl,

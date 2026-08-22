@@ -481,6 +481,51 @@ class AgentProviderTests(unittest.TestCase):
         self.assertEqual(result["peak"], 2)
         self.assertEqual(result["count"], 4)
 
+    def test_consensus_keeps_exact_agreements_and_drops_conflicts(self):
+        result = self._run_node(
+            """
+            const fs = require('fs');
+            const os = require('os');
+            const path = require('path');
+            const net = require('./agent/net');
+            net.setupProxy = async () => {};
+            let round = 0;
+            net.chat = async () => {
+              round++;
+              return { content: JSON.stringify([
+                { id: 1, slot: 'value', type: 'string' },
+                { id: 2, slot: 'value', type: round === 1 ? 'number' : 'boolean' },
+              ]) };
+            };
+            const { inferTypesConsensus } = require('./agent/infer');
+            const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-consensus-'));
+            const source = path.join(temporary, 'index.ts');
+            fs.writeFileSync(source, 'let first, second;\\n');
+            const spots = [1, 2].map(id => ({
+              id, slot: 'value', file: source, relapath: 'index.ts', location: 0,
+              context: 'value' + id, exprText: 'value' + id,
+              exprKind: 'Identifier', morphKind: 'variable',
+              pos: { line: 1, column: id },
+            }));
+            const originalLog = console.log;
+            console.log = () => {};
+            inferTypesConsensus(spots, {
+              provider: 'deepseek', apiKey: 'test-key',
+              baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat',
+            }, 2, 30, undefined, 1).then(feedback => {
+              console.log = originalLog;
+              originalLog(JSON.stringify(feedback));
+              fs.rmSync(temporary, { recursive: true, force: true });
+            }).catch(error => {
+              console.log = originalLog;
+              console.error(error);
+              process.exit(1);
+            });
+            """
+        )
+
+        self.assertEqual(result, [{"id": 1, "slot": "value", "type": "string"}])
+
     def test_deepseek_defaults_and_response_shape_remain_compatible(self):
         result = self._run_node(
             """
