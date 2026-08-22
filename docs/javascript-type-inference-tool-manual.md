@@ -1,0 +1,193 @@
+# JavaScript 类型推导工具说明书
+
+## 1. 工具定位
+
+`ast2type` 从 JavaScript 源代码中提取类型约束，推导变量、函数、对象、数组和联合类型，
+并输出结构化类型信息。工具还提供两条配套流程：
+
+- 将推导结果写回 JavaScript，生成可由 TypeScript 编译器检查的迁移结果；
+- 根据 TypeScript 编译诊断定位类型声明，进行保守的 `any` 降级修复。
+
+类型推导本身不依赖 Ground Truth。Ground Truth 只用于离线评测，不参与正常推导。
+
+## 2. 环境与安装
+
+要求：
+
+| 项目 | 版本/要求 |
+|---|---|
+| Node.js | 22.23.1（Node 18+ 可作为最低运行环境） |
+| npm | 10.9.8 |
+| TypeScript | 5.9.3，随项目依赖安装 |
+| 操作系统 | Linux、macOS；Windows 建议使用 WSL |
+| Agent 模式 | 需要对应 provider 的 API Key；标准模式不需要 |
+
+```bash
+cd ast2type
+npm install
+npm run typecheck
+npm test
+```
+
+`npm test` 是 49 个回归测试的入口，覆盖 AST 输入隔离、类型图、迁移写回、编译器和 Agent
+provider 解析。
+
+## 3. 基本工作流
+
+```text
+JavaScript 源码
+    -> code2ast.ts：生成 AST JSON
+    -> ast2type.ts：收集事实、构建类型图、工作列表求解
+    -> typegraph.json / typeinfo.json：输出推导结果
+    -> src/migration/js.ts：将函数参数和返回类型写回源码
+    -> src/migration/compiler.ts：统一 TypeScript 编译检查
+```
+
+核心模块：
+
+| 文件 | 作用 |
+|---|---|
+| `code2ast.ts` | 读取 JS/TS 项目并生成 AST、导入映射和源码位置 |
+| `ast2type.ts` | 推导入口，协调事实收集、规则应用、求解和结果输出 |
+| `ast2type/fact.ts` | 表示赋值、调用、属性读写、运算等事实 |
+| `ast2type/rule.ts` | 将事实转换为类型约束 |
+| `ast2type/graph.ts` | 保存变量节点、约束边和评测结果 |
+| `ast2type/solver.ts` | 使用工作列表传播类型并处理不透明类型 |
+| `ast2type/nType.ts` | 基础类型、字面量、数组、函数、对象和联合类型 |
+| `src/inference/runner.ts` | 对外提供稳定的项目推导 API |
+| `src/migration/js.ts` | 使用 canonical AST 位置写回 JavaScript 类型 |
+| `src/migration/ts.ts` | 擦除原有 TS 类型并恢复推导类型 |
+| `src/migration/compiler.ts` | `uniform` 和 `project` 两种 TypeScript 检查契约 |
+| `src/migration/repair.ts` | 根据编译诊断执行规则/Agent 修复 |
+
+## 4. 命令行用法
+
+### 4.1 JavaScript 类型推导与迁移
+
+输入必须是一个项目目录。推导中间文件放在独立的 `--work-dir`，避免污染源代码。
+
+```bash
+npm run migration -- migrate-js /tmp/ast2type-demo-src \
+  --out /tmp/ast2type-demo-out \
+  --work-dir /tmp/ast2type-demo-work \
+  --mode std
+```
+
+例如，可以先准备一个只包含单个示例文件的目录：
+
+```bash
+mkdir -p /tmp/ast2type-demo-src
+cp tests/basic/test_arg.js /tmp/ast2type-demo-src/index.js
+```
+
+`tests/basic` 中的脚本相互独立时，建议每次只复制一个脚本到临时目录再执行；把多个脚本
+作为一个 TypeScript 程序编译可能引入全局变量重名错误。
+
+Agent 模式：
+
+```bash
+npm run migration -- migrate-js /path/to/js-project \
+  --out /tmp/migrated-project \
+  --work-dir /tmp/inference-work \
+  --mode agent \
+  --candidate-mode fair \
+  --agent-provider openai \
+  --agent-signature-only \
+  --agent-refine-any
+```
+
+候选模式：
+
+- `fair`：只根据源码和推导上下文构造候选，不读取 Ground Truth，适合正式评测；
+- `gt`：允许旧评测流程使用 Ground Truth 候选，不能用于公平对比。
+
+Agent 参数：
+
+| 参数 | 默认值 | 含义 |
+|---|---:|---|
+| `--agent-batch-size` | 30 | 一次请求中的声明槽位数 |
+| `--agent-concurrency` | 20 | 同一个项目内的并发请求数，大项目可调低 |
+| `--agent-consensus-rounds` | 1 | 独立推导轮数；大于 1 时只保留完全一致的结果 |
+| `--agent-signature-only` | 关闭 | 只请求函数参数和返回值 |
+| `--agent-refine-any` | 关闭 | 额外请求基础求解已经退化为 `any` 的槽位 |
+
+共识轮次不是 DeepSeek 和 GPT 各运行一次。它使用同一 provider/model 独立运行多轮，按
+`id + slot` 对齐，只有每轮类型字符串完全相同才保留。
+
+### 4.2 TypeScript 擦除与恢复
+
+```bash
+npm run migration -- migrate-ts /path/to/ts-project \
+  --out /tmp/restored-project \
+  --work-dir /tmp/ts-inference-work \
+  --mode std
+```
+
+流程是：保存 Ground Truth -> 擦除类型 -> 对擦除后的源码推导 -> 按 canonical 位置恢复类型。
+
+### 4.3 编译检查
+
+统一契约不读取项目 `tsconfig`，使用工具固定的 TypeScript 选项：ES2015 module、ES6 target、
+Bundler module resolution、ES2021/DOM lib、`skipLibCheck` 和声明输出。
+
+```bash
+npm run migration -- check /tmp/migrated-project \
+  --contract uniform \
+  --declarations /tmp/migrated-declarations
+```
+
+如果项目有完整依赖和自己的 `tsconfig.json`，使用项目契约：
+
+```bash
+npm run migration -- check /path/to/project \
+  --contract project \
+  --config tsconfig.json
+```
+
+输出 JSON，包括 `status`、`diagnostics`、`emittedFiles` 和 `compilerVersion`。整包中任意
+一个源文件有错误，项目状态就是 `type-error`。
+
+### 4.4 编译反馈修复
+
+```bash
+npm run migration -- repair /tmp/raw-project \
+  --out /tmp/fixed-project \
+  --strategy rules+agent \
+  --contract uniform \
+  --rule-rounds 5 \
+  --agent-rounds 2 \
+  --max-diagnostics 10 \
+  --agent-provider deepseek
+```
+
+三种策略：
+
+- `rules`：只使用确定性诊断定位和类型降级；
+- `agent`：将局部诊断和源码交给 Agent，并在编译诊断减少时接受编辑；
+- `rules+agent`：先运行规则，再处理剩余错误。
+
+Auto-fix 的边界是类型错误位置。模块缺失、项目外文件、运行时全局和语法结构错误不会被
+盲目改成 `any`。
+
+## 5. 输出文件
+
+推导工作目录常见文件：
+
+| 文件 | 内容 |
+|---|---|
+| `ast/` | 每个源码文件的 AST JSON |
+| `typegraph.json` | 类型节点、约束边和源码位置 |
+| `typeinfo.json` | 可读的类型槽位和上下文 |
+| `evaluation.json` | 指定 Ground Truth 时的离线比较结果 |
+| `inferinfo.json` | Agent 最终接受的反馈检查点 |
+
+迁移输出保留源码目录结构，并生成 `.ts` 文件。`migration-report.json` 记录 canonical
+目标数、写回数、跳过数和兼容性处理数。
+
+## 6. 使用限制
+
+- bundle 中的虚拟模块可能没有真实源码路径，会被明确跳过；
+- 当前写回重点是函数参数和返回值，变量和类成员仍有未覆盖区域；
+- 自定义接口名、跨模块符号和项目运行时全局需要额外环境或 Agent；
+- 不能用单一编译通过率替代 Accuracy 和非 Any 率；
+- 正式学术对比必须使用 `fair` 候选并固定编译环境。
