@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import * as ts from "typescript";
 import { Command } from "commander";
 import { writeJsonStream } from "./code2ast";
 import { FactStore, Emitter, VarId, Fact, TypeId } from "./ast2type/fact"
@@ -114,6 +115,15 @@ function parseBigIntLiteralText(text: string | undefined): bigint {
   return BigInt(withoutSuffix.replace(/_/g, "") || "0");
 }
 
+function parseStringLiteralText(text: string | undefined): string {
+  const raw = text ?? "";
+  const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, ts.LanguageVariant.Standard, raw);
+  const token = scanner.scan();
+  return token === ts.SyntaxKind.StringLiteral || token === ts.SyntaxKind.NoSubstitutionTemplateLiteral
+    ? scanner.getTokenValue()
+    : raw;
+}
+
 // 全局结构
 let typeVarCounter = 100;
 const fileToAst: Record<string, AstNode> = {};
@@ -196,6 +206,52 @@ const functionLikeKinds = new Set([
   "Constructor",
   "GetAccessor",
   "SetAccessor",
+]);
+
+function containsOwnNodeKind(root: AstNode, kind: string): boolean {
+  const visit = (node: AstNode): boolean => {
+    if (node !== root && functionLikeKinds.has(node.kind)) return false;
+    if (node.kind === kind) return true;
+    return node.children?.some(visit) ?? false;
+  };
+  return visit(root);
+}
+
+/** 识别 `if (typeof value !== "string") throw ...` 这类参数前置检查。 */
+function rejectedTypeofGuard(node: AstNode): { identifier: AstNode; type: TypeId } | undefined {
+  if (node.kind !== "BinaryExpression" || !["!=", "!=="].includes(node.children?.[1]?.text ?? "")) {
+    return undefined;
+  }
+  const left = node.children?.[0];
+  const right = node.children?.[2];
+  const typeofNode = left?.kind === "TypeOfExpression" ? left : right?.kind === "TypeOfExpression" ? right : undefined;
+  const literal = left?.kind === "StringLiteral" ? left : right?.kind === "StringLiteral" ? right : undefined;
+  const identifier = typeofNode?.children?.find(child => child.kind === "Identifier");
+  if (!identifier || !literal) return undefined;
+  const primitive = new Map<string, TypeId>([
+    ["string", tNode.STRING],
+    ["number", tNode.NUMBER],
+    ["boolean", tNode.BOOLEAN],
+  ]).get(parseStringLiteralText(literal.text));
+  if (primitive === undefined) return undefined;
+
+  let current: AstNode = node;
+  while (current.parent && current.parent.kind !== "IfStatement") {
+    current = current.parent;
+    if (current.kind === "ParenthesizedExpression") continue;
+    if (current.kind !== "BinaryExpression" || current.children?.[1]?.text !== "||") return undefined;
+  }
+  const ifStatement = current.parent;
+  if (!ifStatement || ifStatement.kind !== "IfStatement") return undefined;
+  const closeParen = ifStatement.children?.findIndex(child => child.kind === "CloseParenToken") ?? -1;
+  const consequent = closeParen >= 0 ? ifStatement.children?.[closeParen + 1] : undefined;
+  return consequent && containsOwnNodeKind(consequent, "ThrowStatement")
+    ? { identifier, type: primitive }
+    : undefined;
+}
+
+const SCOPE_BRACE_PARENTS = new Set([
+  "Block", "ModuleBlock", "ClassDeclaration", "ClassExpression",
 ]);
 
 function hasOwnReturnStatement(root: AstNode): boolean {
@@ -945,11 +1001,11 @@ function secondPass(filePath: string, node: AstNode) {
 
   const handlers: Record<string, (node: AstNode) => void> = {
     StringLiteral(node) {
-      emit.allocLiteral(node.varId!, node.text ?? "unknown text");
+      emit.allocLiteral(node.varId!, parseStringLiteralText(node.text));
       meta.v8Kind.set(node.varId!, "Literal");
     },
     NoSubstitutionTemplateLiteral(node) {
-      emit.allocLiteral(node.varId!, node.text ?? "unknown text");
+      emit.allocLiteral(node.varId!, parseStringLiteralText(node.text));
     },
     FirstLiteralToken(node) {
       // 暂时默认为数字
@@ -1122,6 +1178,15 @@ function secondPass(filePath: string, node: AstNode) {
         operands.set(operator.text!, (operands.get(operator.text!) || new Set()).add(right.varId));
         emit.binaryOp(operator.text!, left.varId!, right.varId!, node.varId!);
 
+        const guard = rejectedTypeofGuard(node);
+        if (guard?.identifier.text) {
+          const binding = (guard.identifier.varId !== undefined ? meta.binding.get(guard.identifier.varId) : undefined)
+            ?? paramBindings.get(guard.identifier.text)
+            ?? varBindings.get(guard.identifier.text)
+            ?? guard.identifier.varId;
+          if (binding !== undefined) emit.allocPrimitive(binding, guard.type);
+        }
+
         const compoundAssignmentOperators = ["FirstCompoundAssignment","MinusEqualsToken","AsteriskEqualsToken","SlashEqualsToken","PercentEqualsToken","AsteriskAsteriskEqualsToken","AmpersandEqualsToken","BarEqualsToken"];
         const arithmeticOperators = ["PlusToken","MinusToken","AsteriskToken","SlashToken","PercentToken","AsteriskAsteriskToken"];
         const logicalOperators = ["AmpersandAmpersandToken", "BarBarToken", "QuestionQuestionToken"];
@@ -1263,6 +1328,7 @@ function secondPass(filePath: string, node: AstNode) {
         // if (node.text === "x") console.log(`Identifier x at line ${node.position?.start?.line}, column ${node.position?.start?.character} in ${filePath} has varId ${node.varId} and typeId ${typeId}`);
 
         if (typeId !== undefined) {
+          meta.binding.set(node.varId!, typeId);
           if ((node.parent?.kind === "PropertyAssignment") && node.parent?.children?.[2] === node) {
             // 属性赋值时不添加sameID约束
             emit.flow(typeId, node.varId!, `property assignment for ${node.text!}`);
@@ -1319,7 +1385,25 @@ function secondPass(filePath: string, node: AstNode) {
         const funcNode = node.children[0];
         if (funcNode.varId !== undefined && node.varId !== undefined) {
           meta.offset.set(node.varId!, funcNode.kind === "PropertyAccessExpression" ? funcNode.children?.[2]?.offset! : funcNode.offset);
-          emit.call(funcNode.varId!, node.varId!);
+          const callOptions: Parameters<Emitter["call"]>[2] = {};
+          if (funcNode.kind === "Identifier" && funcNode.text
+            && !varBindings.has(funcNode.text) && !paramBindings.has(funcNode.text)) {
+            callOptions.calleeName = funcNode.text;
+          } else if (funcNode.kind === "PropertyAccessExpression") {
+            const receiver = funcNode.children?.[0];
+            const property = funcNode.children?.[2];
+            if (receiver?.varId !== undefined && property?.text) {
+              // 标识符出现点最终归并到声明节点，方法调用证据也绑定到该节点。
+              callOptions.receiver = receiver.kind === "Identifier" && receiver.text
+                ? meta.binding.get(receiver.varId)
+                    ?? paramBindings.get(receiver.text)
+                    ?? varBindings.get(receiver.text)
+                    ?? receiver.varId
+                : receiver.varId;
+              callOptions.methodName = property.text;
+            }
+          }
+          emit.call(funcNode.varId!, node.varId!, callOptions);
 
           // 处理实参
           const args = node.children.find(n => n.kind === "SyntaxList");
@@ -1403,6 +1487,8 @@ function secondPass(filePath: string, node: AstNode) {
     },
     // 处理作用域{
     FirstPunctuation(node) {
+      // FirstPunctuation 同时表示代码块和对象字面量的左大括号；后者不创建词法作用域。
+      if (!node.parent || !SCOPE_BRACE_PARENTS.has(node.parent.kind)) return;
       scopeStack.push(varBindings);
       varBindings = new Map(varBindings);
       unprocsdScopes.push(unprocsdVars);
@@ -1418,6 +1504,7 @@ function secondPass(filePath: string, node: AstNode) {
     },
     // 处理作用域}
     CloseBraceToken(node) {
+      if (!node.parent || !SCOPE_BRACE_PARENTS.has(node.parent.kind)) return;
       // 恢复旧的变量绑定
       const previous = scopeStack.pop();
       unprocsdScopes.pop();

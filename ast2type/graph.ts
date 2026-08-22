@@ -4,6 +4,17 @@ import { NodeState, tNodeStore, DeterminantNodeState } from "./nType";
 import * as path from "path";
 import * as fs from "fs";
 
+const STRING_RETURNING_METHODS = new Set([
+    "charAt", "concat", "normalize", "padEnd", "padStart", "repeat", "replace",
+    "replaceAll", "slice", "substr", "substring", "toLocaleLowerCase",
+    "toLocaleUpperCase", "toLowerCase", "toString", "toUpperCase", "trim",
+    "trimEnd", "trimStart", "valueOf",
+]);
+const STRING_BOOLEAN_METHODS = new Set(["endsWith", "includes", "startsWith"]);
+const STRING_NUMBER_METHODS = new Set([
+    "charCodeAt", "indexOf", "lastIndexOf", "localeCompare", "search",
+]);
+
 function sourceLocation(astFile: string | undefined) {
     if (!astFile) {
         return { relapath: "unknown_relapath", file: "unknown_file" };
@@ -18,6 +29,35 @@ function sourceLocation(astFile: string | undefined) {
         .replace(/\^/g, path.sep)
         .replace(/\.ast\.json$/, "");
     return { relapath, file: path.join(sourceDir, relapath) };
+}
+
+function methodReturnType(typeId: TypeId, method: string, visiting = new Set<TypeId>()): TypeId | undefined {
+    if (visiting.has(typeId)) return undefined;
+    visiting.add(typeId);
+    const type = tNode.get(typeId);
+    if (!type) return undefined;
+    if (type.kind === "union") {
+        // 联合中含 any/unknown 时，无法保证方法属于同一内建类型。
+        if (type.types.some(member => member === tNode.ANY || member === tNode.UNKNOWN)) return undefined;
+        const returns = type.types
+            .map(member => methodReturnType(member, method, new Set(visiting)))
+            .filter((value): value is TypeId => value !== undefined);
+        return returns.length ? tNode.merge(returns) : undefined;
+    }
+
+    const stringLike = (type.kind === "primitive" && type.name === "string")
+        || (type.kind === "literal" && typeof type.value === "string");
+    if (stringLike) {
+        if (STRING_BOOLEAN_METHODS.has(method)) return tNode.BOOLEAN;
+        if (STRING_NUMBER_METHODS.has(method)) return tNode.NUMBER;
+        if (STRING_RETURNING_METHODS.has(method)) return tNode.STRING;
+        return undefined;
+    }
+
+    const regexpLike = (type.kind === "literal" && type.value instanceof RegExp)
+        || (type.kind === "object" && type.name === "RegExp");
+    if (regexpLike && method === "test") return tNode.BOOLEAN;
+    return undefined;
 }
 
 export class TypeGraph {
@@ -332,6 +372,17 @@ export class TypeGraph {
                         this.setType(edge.to, new DeterminantNodeState(merged));
                         worklist.push(edge.to);
                     }
+                }
+            }
+            if (edge.type.startsWith("methodCall:")) {
+                const method = edge.type.slice("methodCall:".length);
+                const returnType = methodReturnType(ty.val, method);
+                if (returnType === undefined) continue;
+                const toType = this.nodes.get(edge.to);
+                const merged = toType ? tNode.merge([toType.val, returnType]) : returnType;
+                if (!toType || merged !== toType.val) {
+                    this.setType(edge.to, new DeterminantNodeState(merged));
+                    worklist.push(edge.to);
                 }
             }
             // 注解边、返回注解边、起源边和枚举成员边在getToEdges方向不需要特殊处理

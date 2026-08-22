@@ -1,6 +1,13 @@
 import { meta, tNode } from "../ast2type";
 import { AllocArrayFact, AllocLiteralFact, AllocObjFact, ArrayElementFact, AnnotFact, BinaryOpFact, CallFact, Fact, FlowFact, NewInstanceFact, ParamFact, ArgFact, ReturnStmtFact, ReturnVoidFact, ReturnAnnotFact, AllocFunctionFact, PropFact, SameIDFact, TypeId, UnaryOpFact, VarId, TernaryOpFact, AllocEnumFact, EnumMemberFact, AllocInterfaceFact, AllocClassFact, AllocPrimitiveFact, OriginFact, AliasFact } from "./fact"
 
+const INTRINSIC_STRING_RECEIVER_METHODS = new Set([
+    "charAt", "charCodeAt", "endsWith", "localeCompare", "normalize", "padEnd",
+    "padStart", "repeat", "replace", "replaceAll", "search", "startsWith",
+    "substr", "substring", "toLocaleLowerCase", "toLocaleUpperCase", "toLowerCase",
+    "toUpperCase", "trim", "trimEnd", "trimStart",
+]);
+
 // 规则工厂
 export class RuleStore {
     private rules: Rule[] = [];
@@ -116,6 +123,9 @@ class BinaryOpRule implements Rule {
         switch (fact.operator) {
             // 在这里可以根据不同的二元操作符添加不同的处理逻辑
             case "=":
+                // 可变赋值会放宽字面量：flag = true 后仍可能接收任意 boolean。
+                return [{ kind: "addEdge", from: fact.left, to: fact.result, edgeType: "sameType" },
+                        { kind: "addEdge", from: fact.right, to: fact.left, edgeType: "assignment" }];
             case "+=":
             case "-=":
             case "*=":
@@ -246,7 +256,32 @@ class SameIDRule implements Rule {
 
 class CallRule implements Rule {
     apply(fact: CallFact): GraphEffect[] {
-        return [{ kind: "addEdge", from: fact.func, to: fact.result, edgeType: "call" }]
+        const effects: GraphEffect[] = [
+            { kind: "addEdge", from: fact.func, to: fact.result, edgeType: "call" },
+        ];
+
+        const globalReturnTypes: Record<string, TypeId> = {
+            String: tNode.STRING,
+            Number: tNode.NUMBER,
+            Boolean: tNode.BOOLEAN,
+        };
+        if (fact.calleeName && globalReturnTypes[fact.calleeName] !== undefined) {
+            effects.push({ kind: "genType", node: fact.result, type: globalReturnTypes[fact.calleeName] });
+        }
+
+        if (fact.receiver !== undefined && fact.methodName) {
+            effects.push({
+                kind: "addEdge",
+                from: fact.receiver,
+                to: fact.result,
+                edgeType: `methodCall:${fact.methodName}`,
+            });
+            // 这些方法名足够明确，即使接收者初始未知（通常是函数参数）也可作为证据。
+            if (INTRINSIC_STRING_RECEIVER_METHODS.has(fact.methodName)) {
+                effects.push({ kind: "genType", node: fact.receiver, type: tNode.STRING });
+            }
+        }
+        return effects;
     }
     canHandle(fact: Fact): boolean {
         return fact.kind === "Call"

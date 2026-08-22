@@ -175,6 +175,11 @@ export interface CallFact {
   kind: "Call";
   func: VarId;
   result: VarId;
+  /** 未被局部绑定遮蔽的全局调用名，例如 String 或 Number。 */
+  calleeName?: string;
+  /** 方法调用的接收者和属性名，例如 value.trim()。 */
+  receiver?: VarId;
+  methodName?: string;
 }
 
 
@@ -313,7 +318,11 @@ export class Emitter {
     this.store.add({ kind: "SameID", source, target });
   }
 
-  call(func: VarId, result: VarId) {
-    this.store.add({ kind: "Call", func, result });
+  call(
+    func: VarId,
+    result: VarId,
+    options: Pick<CallFact, "calleeName" | "receiver" | "methodName"> = {},
+  ) {
+    this.store.add({ kind: "Call", func, result, ...options });
   }
 }

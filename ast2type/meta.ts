@@ -7,6 +7,8 @@ export class MetaStore {
   kind = new Map<VarId, string>();
   text = new Map<VarId, string>();
   context = new Map<VarId, string>();
+  /** 标识符出现点到规范声明/绑定节点的映射。 */
+  binding = new Map<VarId, VarId>();
 
   // ===== 可选 feature =====
   v8Kind = new Map<VarId, string>();
