@@ -13,3 +13,4 @@ node_modules/
 /tmp_test
 __pycache__/
 *.py[cod]
+/docs/华为*
